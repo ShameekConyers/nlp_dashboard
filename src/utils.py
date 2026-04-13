@@ -46,6 +46,37 @@ GAME_GENRES: dict[str, str] = {name: info[1] for name, info in GAME_CATALOG.item
 
 
 # ---------------------------------------------------------------------------
+# Preprocessing thresholds (Phase 2)
+# ---------------------------------------------------------------------------
+
+MIN_CLEAN_TEXT_CHARS: int = 10
+"""Minimum cleaned_text length (in characters) for a review to be kept."""
+
+MIN_TOKEN_COUNT: int = 3
+"""Minimum number of tokens (after filtering) for a review to be kept."""
+
+SPACY_MODEL_NAME: str = "en_core_web_sm"
+"""spaCy model used by the preprocessing pipeline."""
+
+PROJECT_STOPWORDS: frozenset[str] = frozenset({"game", "play", "player", "steam"})
+"""Project-specific stopwords layered on top of spaCy's English defaults.
+
+These four tokens dominate Steam reviews (>80% frequency) and bury real topic
+signal. Filtered in `preprocessing.Preprocessor.tokenize_batch`.
+"""
+
+# ---------------------------------------------------------------------------
+# Sentiment thresholds (Phase 3)
+# ---------------------------------------------------------------------------
+
+VADER_POSITIVE_THRESHOLD: float = 0.05
+"""Compound score >= this is classified as positive sentiment."""
+
+VADER_NEGATIVE_THRESHOLD: float = -0.05
+"""Compound score <= this is classified as negative sentiment."""
+
+
+# ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
 
