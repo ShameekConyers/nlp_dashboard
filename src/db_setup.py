@@ -60,20 +60,37 @@ CREATE TABLE IF NOT EXISTS nlp_results (
     processed_at       TEXT
 );
 
+CREATE TABLE IF NOT EXISTS processed_documents (
+    document_id    INTEGER PRIMARY KEY REFERENCES documents(id),
+    cleaned_text   TEXT NOT NULL,
+    tokens         TEXT NOT NULL,
+    token_count    INTEGER NOT NULL,
+    char_count     INTEGER NOT NULL,
+    processed_at   TEXT DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_documents_app_id ON documents(app_id);
 CREATE INDEX IF NOT EXISTS idx_documents_recommended ON documents(recommended);
 CREATE INDEX IF NOT EXISTS idx_nlp_results_topic_id ON nlp_results(topic_id);
+CREATE INDEX IF NOT EXISTS idx_processed_documents_token_count
+    ON processed_documents(token_count);
 """
 
 
 def create_tables(conn: sqlite3.Connection) -> None:
-    """Create documents, nlp_results, and metadata tables if they don't exist.
+    """Create all project tables and indexes if they don't exist.
+
+    Creates metadata, documents, nlp_results, and processed_documents.
+    Safe to call on an existing database — every DDL statement uses
+    IF NOT EXISTS so this doubles as an additive migration helper.
 
     Args:
         conn: Active SQLite connection.
     """
     conn.executescript(_SCHEMA_SQL)
-    logger.info("Schema ensured (metadata, documents, nlp_results).")
+    logger.info(
+        "Schema ensured (metadata, documents, nlp_results, processed_documents)."
+    )
 
 
 def load_raw_json(json_path: Path) -> list[dict]:
