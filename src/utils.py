@@ -75,6 +75,19 @@ VADER_POSITIVE_THRESHOLD: float = 0.05
 VADER_NEGATIVE_THRESHOLD: float = -0.05
 """Compound score <= this is classified as negative sentiment."""
 
+# ---------------------------------------------------------------------------
+# Topic modeling (Phase 4)
+# ---------------------------------------------------------------------------
+
+BERTOPIC_EMBEDDING_MODEL: str = "all-MiniLM-L6-v2"
+"""Sentence-transformer model used by BERTopic for document embeddings."""
+
+BERTOPIC_MIN_TOPIC_SIZE: int = 10
+"""Minimum number of documents required to form a topic."""
+
+BERTOPIC_RANDOM_STATE: int = 42
+"""Random seed for UMAP dimensionality reduction (reproducibility)."""
+
 
 # ---------------------------------------------------------------------------
 # Logging

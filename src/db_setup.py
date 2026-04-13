@@ -69,6 +69,14 @@ CREATE TABLE IF NOT EXISTS processed_documents (
     processed_at   TEXT DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS topics (
+    topic_id     INTEGER PRIMARY KEY,
+    label        TEXT NOT NULL,
+    top_words    TEXT NOT NULL,
+    doc_count    INTEGER NOT NULL,
+    processed_at TEXT DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_documents_app_id ON documents(app_id);
 CREATE INDEX IF NOT EXISTS idx_documents_recommended ON documents(recommended);
 CREATE INDEX IF NOT EXISTS idx_nlp_results_topic_id ON nlp_results(topic_id);
@@ -89,7 +97,7 @@ def create_tables(conn: sqlite3.Connection) -> None:
     """
     conn.executescript(_SCHEMA_SQL)
     logger.info(
-        "Schema ensured (metadata, documents, nlp_results, processed_documents)."
+        "Schema ensured (metadata, documents, nlp_results, processed_documents, topics)."
     )
 
 
