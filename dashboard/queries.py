@@ -406,6 +406,28 @@ def get_topic_words(conn: sqlite3.Connection, topic_id: int) -> str:
     return row[0] if row else ""
 
 
+def get_sentiment_with_genre(
+    conn: sqlite3.Connection,
+    **filters: Any,
+) -> pd.DataFrame:
+    """Return per-review sentiment with genre for histogram overlay.
+
+    Args:
+        conn: Open SQLite connection.
+        **filters: Keyword arguments forwarded to ``_build_where``.
+
+    Returns:
+        DataFrame with columns ``sentiment_compound`` and ``genre``.
+    """
+    where, params = _build_where(**filters)
+    sql = f"""
+        SELECT n.sentiment_compound, m.genre
+        {_BASE_FROM}
+        WHERE {where}
+    """
+    return pd.read_sql_query(sql, conn, params=params)
+
+
 def get_reviews_table(
     conn: sqlite3.Connection,
     limit: int = 100,

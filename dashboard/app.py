@@ -35,6 +35,7 @@ from dashboard.queries import (  # noqa: E402
     get_sentiment_distribution,
     get_sentiment_over_time,
     get_sentiment_vs_recommendation,
+    get_sentiment_with_genre,
     get_topic_distribution,
     get_topic_words,
 )
@@ -106,20 +107,8 @@ selected_genres: list[str] = st.sidebar.multiselect(
     "Genre", options["genres"]
 )
 
-# Game multiselect — filtered by selected genres if any
-if selected_genres:
-    available_games = [
-        name for name in options["game_names"]
-        if any(
-            _genre_for_game(conn, name) == g for g in selected_genres
-        )
-    ] if False else options["game_names"]
-    # Simpler approach: just show all games, let the SQL handle genre filtering
-    available_games = options["game_names"]
-else:
-    available_games = options["game_names"]
-
-selected_games: list[str] = st.sidebar.multiselect("Game", available_games)
+# Game multiselect — SQL handles genre filtering, so show all games here
+selected_games: list[str] = st.sidebar.multiselect("Game", options["game_names"])
 
 # Sentiment range slider
 sentiment_range: tuple[float, float] = st.sidebar.slider(
@@ -336,7 +325,7 @@ def _render_sentiment() -> None:
 
     # Sentiment distribution by genre
     st.subheader("Sentiment Distribution by Genre")
-    review_genre_df = _get_sentiment_with_genre(conn, **filters)
+    review_genre_df = get_sentiment_with_genre(conn, **filters)
 
     if len(review_genre_df) > 0:
         fig = px.histogram(
@@ -353,31 +342,6 @@ def _render_sentiment() -> None:
         )
         fig.update_layout(margin=dict(t=10))
         st.plotly_chart(fig, use_container_width=True)
-
-
-def _get_sentiment_with_genre(
-    conn: sqlite3.Connection, **filters: dict
-) -> "pd.DataFrame":
-    """Return per-review sentiment with genre for histogram overlay.
-
-    Args:
-        conn: Open SQLite connection.
-        **filters: Keyword arguments forwarded to ``_build_where``.
-
-    Returns:
-        DataFrame with columns ``sentiment_compound`` and ``genre``.
-    """
-    import pandas as pd
-
-    from dashboard.queries import _BASE_FROM, _build_where
-
-    where, params = _build_where(**filters)
-    sql = f"""
-        SELECT n.sentiment_compound, m.genre
-        {_BASE_FROM}
-        WHERE {where}
-    """
-    return pd.read_sql_query(sql, conn, params=params)
 
 
 # ---------------------------------------------------------------------------
