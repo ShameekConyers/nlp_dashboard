@@ -6,7 +6,7 @@ An NLP pipeline that transforms unstructured Steam game reviews into structured 
 
 ## Business Question
 
-Players leave thousands of free-text reviews on Steam, but the platform only surfaces a binary thumbs-up/down. Can an NLP pipeline extract more from that text — reliable sentiment scores, recurring themes, genre-level patterns — or does the noise in short, casual reviews make automated analysis unreliable? This project finds out using 2,382 reviews across 12 games and validates every result against Steam's own recommendation flag as ground truth.
+Players leave thousands of free-text reviews on Steam, but the platform only surfaces a binary thumbs-up/down. Can an NLP pipeline extract more from that text (reliable sentiment scores, recurring themes, genre-level patterns) or does the noise in short, casual reviews make automated analysis unreliable? This project finds out using 2,382 reviews across 12 games and validates every result against Steam's own recommendation flag as ground truth.
 
 ---
 
@@ -25,11 +25,11 @@ All data comes from the [Steam Reviews API](https://store.steampowered.com/appre
 
 ## Key Findings
 
-1. **Nearly half the reviews were unusable.** 1,181 of 2,382 reviews had fewer than 5 tokens after preprocessing — emoji spam, single-word jokes, ASCII art. The sentinel filter caught all of these before they could pollute downstream analysis.
+1. **Nearly half the reviews were unusable.** 1,181 of 2,382 reviews had fewer than 5 tokens after preprocessing: emoji spam, single-word jokes, ASCII art. The sentinel filter caught all of these before they could pollute downstream analysis.
 2. **VADER agrees with the Steam recommendation flag 62.8% of the time.** That sounds low, but the mismatch is informative: players routinely recommend a game while writing paragraphs of complaints about specific features, or pan a game they clearly enjoy. The recommendation flag is a noisy ground truth.
-3. **Sentiment skews positive overall** (average compound score of 0.135), consistent with Steam's self-selection bias — engaged players who bother to write reviews tend to like what they're playing.
+3. **Sentiment skews positive overall** (average compound score of 0.135), consistent with Steam's self-selection bias. Engaged players who bother to write reviews tend to like what they're playing.
 4. **Topic modeling surfaced 11 themes, but several are non-English clusters** (Polish, Russian, German, Turkish). The pipeline has no language filter, so BERTopic grouped foreign-language reviews by shared vocabulary rather than shared meaning. Language detection is the most obvious preprocessing improvement.
-5. **The high-signal topics that do emerge are genre-flavored** — gameplay mechanics dominate FPS reviews, narrative and world-building surface in RPG clusters, and "cozy" vocabulary anchors the Indie topics.
+5. **The high-signal topics that do emerge are genre-flavored.** Gameplay mechanics dominate FPS reviews, narrative and world-building surface in RPG clusters, and "cozy" vocabulary anchors the Indie topics.
 
 ---
 
@@ -56,7 +56,7 @@ The 62.8% tells you VADER captures the general direction of sentiment but breaks
 - 11 topics extracted from the review corpus (excluding the outlier topic)
 - Per-review topic assignments stored in SQLite for dashboard querying
 
-Topic quality is mixed. The English-language topics are interpretable and track real discussion themes (gameplay mechanics, story/narrative, value/pricing). The non-English clusters are noise that a language filter would clean up. With 1,201 reviews across 12 games, BERTopic is working with a small corpus — more data per game would sharpen the topic boundaries.
+Topic quality is mixed. The English-language topics are interpretable and track real discussion themes (gameplay mechanics, story/narrative, value/pricing). The non-English clusters are noise that a language filter would clean up. With 1,201 reviews across 12 games, BERTopic is working with a small corpus. More data per game would sharpen the topic boundaries.
 
 ---
 
@@ -64,10 +64,10 @@ Topic quality is mixed. The English-language topics are interpretable and track 
 
 The Streamlit dashboard provides four interactive views with SQL-backed filtering. All filters push down to SQLite queries rather than in-memory DataFrame filtering.
 
-- **Overview** — KPI cards (total reviews, average sentiment, top genre) and high-level distribution charts
-- **Sentiment Analysis** — Sentiment score distributions, ground truth validation against the recommendation flag, per-game sentiment comparison
-- **Topic Analysis** — Topic distribution, word clouds, topic-sentiment cross-tabulation
-- **Review Explorer** — Filterable, paginated table of individual reviews with sentiment scores and topic assignments
+- **Overview:** KPI cards (total reviews, average sentiment, top genre) and high-level distribution charts
+- **Sentiment Analysis:** Sentiment score distributions, ground truth validation against the recommendation flag, per-game sentiment comparison
+- **Topic Analysis:** Topic distribution, word clouds, topic-sentiment cross-tabulation
+- **Review Explorer:** Filterable, paginated table of individual reviews with sentiment scores and topic assignments
 
 Filters include genre, game, sentiment range, and topic.
 
@@ -99,7 +99,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 python -m spacy download en_core_web_sm
 
-# Run dashboard (uses included seed database — no API calls needed)
+# Run dashboard (uses included seed database, no API calls needed)
 streamlit run dashboard/app.py
 ```
 
@@ -131,7 +131,7 @@ nlp_dashboard/
 │   ├── app.py                  # Streamlit dashboard
 │   └── queries.py              # SQL query functions for dashboard views
 ├── data/
-│   └── seed.db                 # Included — works on clone (<25 MB)
+│   └── seed.db                 # Included, works on clone (<25 MB)
 ├── tests/                      # 90 tests covering schema, dedup, NLP, dashboard
 └── requirements.txt
 ```
@@ -148,8 +148,8 @@ nlp_dashboard/
 
 ### Next Steps
 
-- **Language detection** — filter non-English reviews in preprocessing so BERTopic only clusters reviews it can meaningfully compare
-- **Manual topic relabeling** — replace auto-generated top-word labels with human-readable names that a stakeholder can scan
-- **Transformer-based sentiment** — swap VADER for a fine-tuned DistilBERT to handle sarcasm, mixed opinions, and gaming jargon that a lexicon misses
-- **More data per game** — pulling 1,000+ reviews per game would sharpen topic boundaries and reduce outlier noise
-- **Temporal analysis** — track sentiment trends over time to catch the impact of patches, DLC releases, or controversies
+- **Language detection.** Filter non-English reviews in preprocessing so BERTopic only clusters reviews it can meaningfully compare.
+- **Manual topic relabeling.** Replace auto-generated top-word labels with human-readable names that a stakeholder can scan.
+- **Transformer-based sentiment.** Swap VADER for a fine-tuned DistilBERT to handle sarcasm, mixed opinions, and gaming jargon that a lexicon misses.
+- **More data per game.** Pulling 1,000+ reviews per game would sharpen topic boundaries and reduce outlier noise.
+- **Temporal analysis.** Track sentiment trends over time to catch the impact of patches, DLC releases, or controversies.
