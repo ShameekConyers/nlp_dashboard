@@ -107,7 +107,9 @@ def pull_reviews_for_app(
         max_reviews: Stop after collecting this many unique reviews.
 
     Returns:
-        Path to the saved JSON file in data/raw/.
+        Path to the JSON cache file in data/raw/. If no reviews could be
+        collected, the file is not written and the path may not exist, so
+        the next run retries instead of caching an empty result.
     """
     json_path = _get_json_path(app_name, app_id)
 
@@ -163,6 +165,14 @@ def pull_reviews_for_app(
         time.sleep(PAGE_DELAY)
 
     logger.info("Pulled %d reviews for %s (%d)", len(all_reviews), app_name, app_id)
+
+    if not all_reviews:
+        logger.warning(
+            "No reviews collected for %s (%d). Skipping cache write so the next run retries.",
+            app_name,
+            app_id,
+        )
+        return json_path
 
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(list(all_reviews.values()), f, ensure_ascii=False)

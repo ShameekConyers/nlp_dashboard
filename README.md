@@ -1,6 +1,6 @@
 # What Are Customers Actually Saying? NLP-Powered Review Analysis
 
-An NLP pipeline that transforms unstructured Steam game reviews into structured insights using sentiment analysis and topic modeling, visualized through an interactive Streamlit dashboard.
+An NLP pipeline that scores 2,382 Steam game reviews with VADER sentiment, clusters them into topics with BERTopic, and validates both against Steam's own thumbs-up flag. Results are served through an interactive Streamlit dashboard.
 
 ---
 
@@ -25,9 +25,9 @@ All data comes from the [Steam Reviews API](https://store.steampowered.com/appre
 
 ## Key Findings
 
-1. **Nearly half the reviews were unusable.** 1,181 of 2,382 reviews had fewer than 5 tokens after preprocessing: emoji spam, single-word jokes, ASCII art. The sentinel filter caught all of these before they could pollute downstream analysis.
-2. **VADER agrees with the Steam recommendation flag 62.8% of the time.** That sounds low, but the mismatch is informative: players routinely recommend a game while writing paragraphs of complaints about specific features, or pan a game they clearly enjoy. The recommendation flag is a noisy ground truth.
-3. **Sentiment skews positive overall** (average compound score of 0.135), consistent with Steam's self-selection bias. Engaged players who bother to write reviews tend to like what they're playing.
+1. **A third of the reviews were unusable.** 823 of 2,382 reviews failed the sentinel filter (under 10 characters after cleaning, or fewer than 3 real tokens): emoji spam, single-word jokes, ASCII art. The filter caught all of these before they could pollute downstream analysis.
+2. **VADER agrees with the Steam recommendation flag 69.4% of the time.** The remaining third is informative: players routinely recommend a game while writing paragraphs of complaints about specific features, or pan a game they clearly enjoy. The recommendation flag is a noisy ground truth.
+3. **Sentiment skews positive overall** (average compound score of 0.131), consistent with Steam's self-selection bias. Engaged players who bother to write reviews tend to like what they're playing.
 4. **Topic modeling surfaced 11 themes, but several are non-English clusters** (Polish, Russian, German, Turkish). The pipeline has no language filter, so BERTopic grouped foreign-language reviews by shared vocabulary rather than shared meaning. Language detection is the most obvious preprocessing improvement.
 5. **The high-signal topics that do emerge are genre-flavored.** Gameplay mechanics dominate FPS reviews, narrative and world-building surface in RPG clusters, and "cozy" vocabulary anchors the Indie topics.
 
@@ -37,18 +37,19 @@ All data comes from the [Steam Reviews API](https://store.steampowered.com/appre
 
 ### Text Preprocessing
 
-- HTML, URL, and email removal; Unicode encoding normalization
+- HTML, BBCode, URL, and email removal
+- Unicode encoding repair (ftfy)
 - spaCy tokenization and lemmatization (`en_core_web_sm`)
 - Domain-specific stopword filtering
-- Sentinel exclusion: reviews under 5 tokens flagged and excluded from NLP analysis (1,181 of 2,382 filtered out, leaving 1,201 for analysis)
+- Sentinel exclusion: reviews under 10 characters after cleaning or under 3 tokens are flagged and excluded from NLP analysis (823 of 2,382 filtered out, leaving 1,559 for analysis)
 
 ### Sentiment Analysis
 
 - VADER (`nltk.sentiment`) compound scoring on preprocessed text
-- Distribution across 1,201 kept reviews: 55.3% positive, 36.4% negative, 8.3% neutral
-- Validated against Steam recommendation flag as ground truth (62.8% agreement rate)
+- Distribution across 1,559 kept reviews: 53.8% positive, 35.1% negative, 11.2% neutral
+- Validated against Steam recommendation flag as ground truth (69.4% agreement rate)
 
-The 62.8% tells you VADER captures the general direction of sentiment but breaks down where text tone and the binary recommendation diverge. A player who writes "love this game but the netcode is garbage and matchmaking takes forever" gets a mixed compound score, even though they hit thumbs-up. VADER is a blunt instrument on this kind of text.
+The 69.4% tells you VADER captures the general direction of sentiment but breaks down where text tone and the binary recommendation diverge. A player who writes "love this game but the netcode is garbage and matchmaking takes forever" gets a mixed compound score, even though they hit thumbs-up. VADER is a blunt instrument on this kind of text.
 
 ### Topic Modeling
 
@@ -56,7 +57,7 @@ The 62.8% tells you VADER captures the general direction of sentiment but breaks
 - 11 topics extracted from the review corpus (excluding the outlier topic)
 - Per-review topic assignments stored in SQLite for dashboard querying
 
-Topic quality is mixed. The English-language topics are interpretable and track real discussion themes (gameplay mechanics, story/narrative, value/pricing). The non-English clusters are noise that a language filter would clean up. With 1,201 reviews across 12 games, BERTopic is working with a small corpus. More data per game would sharpen the topic boundaries.
+Topic quality is mixed. The English-language topics are interpretable and track real discussion themes (gameplay mechanics, story/narrative, value/pricing). The non-English clusters are noise that a language filter would clean up. With 1,559 reviews across 12 games, BERTopic is working with a small corpus. More data per game would sharpen the topic boundaries.
 
 ---
 
@@ -95,23 +96,22 @@ Filters include genre, game, sentiment range, and topic.
 git clone <repo-url>
 cd nlp_dashboard
 python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python -m spacy download en_core_web_sm
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python -m spacy download en_core_web_sm
 
 # Run dashboard (uses included seed database, no API calls needed)
-streamlit run dashboard/app.py
+.venv/bin/streamlit run dashboard/app.py
 ```
 
 To run the full pipeline from the Steam API:
 
 ```bash
-python src/data_pull.py
-python src/db_setup.py --full
-python src/preprocessing.py
-python src/sentiment.py
-python src/topics.py
-streamlit run dashboard/app.py
+.venv/bin/python src/data_pull.py
+.venv/bin/python src/db_setup.py --full
+.venv/bin/python src/preprocessing.py
+.venv/bin/python src/sentiment.py
+.venv/bin/python src/topics.py
+.venv/bin/streamlit run dashboard/app.py
 ```
 
 ---
@@ -143,8 +143,8 @@ nlp_dashboard/
 ### Limitations
 
 - **No language filter.** The pipeline processes all reviews regardless of language. BERTopic groups non-English reviews into clusters that look like topics but carry no analytical meaning. This inflates the topic count and dilutes English-language topic quality.
-- **Small corpus per game.** With ~200 reviews per game (1,201 total after sentinel filtering), BERTopic is working near the lower bound for stable topic extraction. Topic boundaries are soft and some themes likely merge or split depending on the random seed.
-- **VADER is lexicon-based.** It scores words in isolation without understanding context, sarcasm, or domain-specific slang. Gaming jargon ("this game slaps," "absolute banger") and mixed-sentiment paragraphs degrade accuracy. The 62.8% agreement rate reflects this ceiling.
+- **Small corpus per game.** With 200 reviews pulled per game (1,559 total after sentinel filtering), BERTopic is working near the lower bound for stable topic extraction. Topic boundaries are soft and some themes likely merge or split depending on the random seed.
+- **VADER is lexicon-based.** It scores words in isolation without understanding context, sarcasm, or domain-specific slang. Gaming jargon ("this game slaps," "absolute banger") and mixed-sentiment paragraphs degrade accuracy. The 69.4% agreement rate reflects this ceiling.
 
 ### Next Steps
 

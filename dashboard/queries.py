@@ -396,8 +396,9 @@ def get_topic_words(conn: sqlite3.Connection, topic_id: int) -> str:
         topic_id: The topic to look up.
 
     Returns:
-        Space-separated string of representative words, or empty string if
-        the topic is not found.
+        JSON-encoded list of representative words (e.g.
+        ``'["fight", "sword", "enemy"]'``), or empty string if the topic
+        is not found.
     """
     cur = conn.execute(
         "SELECT top_words FROM topics WHERE topic_id = ?", (topic_id,)

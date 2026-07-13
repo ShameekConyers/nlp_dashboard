@@ -181,7 +181,8 @@ class TopicModeler:
         """Save the fitted BERTopic model to disk.
 
         Args:
-            path: Directory to save the model into.
+            path: File path to save the model to. Parent directories are
+                created if missing.
 
         Raises:
             ValueError: If fit() has not been called yet.

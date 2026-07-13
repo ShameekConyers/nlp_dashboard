@@ -59,7 +59,10 @@ st.set_page_config(
 
 @st.cache_resource
 def _get_connection() -> sqlite3.Connection:
-    """Open a read-only SQLite connection to the project database.
+    """Open a shared SQLite connection to the project database.
+
+    The connection is cached by Streamlit and reused across sessions and
+    threads. The dashboard only reads from it.
 
     Returns:
         An open sqlite3.Connection.
@@ -67,15 +70,16 @@ def _get_connection() -> sqlite3.Connection:
     mode = os.environ.get("NLP_DASHBOARD_MODE", "seed")
     db_path = get_db_path(mode)
     if not db_path.exists():
+        nlp_flag = " --full" if mode == "full" else ""
         st.error(
             f"Database not found at `{db_path}`.\n\n"
             "Run the pipeline first:\n"
             "```\n"
             ".venv/bin/python src/data_pull.py\n"
             ".venv/bin/python src/db_setup.py --full\n"
-            ".venv/bin/python src/preprocessing.py --full\n"
-            ".venv/bin/python src/sentiment.py --full\n"
-            ".venv/bin/python src/topics.py --full\n"
+            f".venv/bin/python src/preprocessing.py{nlp_flag}\n"
+            f".venv/bin/python src/sentiment.py{nlp_flag}\n"
+            f".venv/bin/python src/topics.py{nlp_flag}\n"
             "```"
         )
         st.stop()
@@ -101,6 +105,10 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("Filters")
 
 options = get_filter_options(conn)
+
+if options["date_min"] is None or options["date_max"] is None:
+    st.error("The database contains no reviews. Run the pipeline to load data first.")
+    st.stop()
 
 # Genre multiselect
 selected_genres: list[str] = st.sidebar.multiselect(
