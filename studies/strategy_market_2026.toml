@@ -1,0 +1,266 @@
+# Market analysis of historical and tactical strategy games.
+#
+# Cohorts: turn_structure (subgroups igo_ugo, alternating, wego), historical_peer,
+# anchor. Tags: matched_basket marks the 2,000 to 14,000 review comparison basket,
+# stand_in marks titles kept for coverage but excluded from matched-basket rows.
+
+[study]
+name = "strategy_market_2026"
+title = "Market analysis of historical and tactical strategy games"
+seed_db = "data/market_seed.db"
+full_db = "data/market_full.db"
+raw_dir = "data/raw/strategy_market_2026"
+language_filter = true
+aspect_lexicon = "studies/aspects_strategy_v1.toml"
+
+[sampling]
+method = "natural"            # census pull, uniform per-game seed sample
+filter = "recent"             # creation-date order; "all" is helpfulness-sorted and biased
+language = "english"
+review_type = "all"           # never positive/negative: that would stratify
+purchase_type = "all"
+filter_offtopic_activity = 1
+num_per_page = 100
+raw_cap_per_game = 20000      # recent-first; effective window recorded when it binds
+seed_cap_per_game = 500       # tuned to the committed size budget
+random_seed = 42
+
+[topics]
+umap_preset = "bertopic_default"   # the legacy April UMAP collapses reviews into one cluster
+min_topic_size = 40
+
+[baseline]                    # population check (num_per_page=0)
+language = "all"
+purchase_type = "all"
+
+[[apps]]
+app_id = 268500
+name = "XCOM 2"
+genre = "Tactics"
+cohort = "turn_structure"
+subgroup = "igo_ugo"
+tags = []
+
+[[apps]]
+app_id = 590380
+name = "Into the Breach"
+genre = "Tactics"
+cohort = "turn_structure"
+subgroup = "igo_ugo"
+tags = []
+
+[[apps]]
+app_id = 607050
+name = "Wargroove"
+genre = "Tactics"
+cohort = "turn_structure"
+subgroup = "igo_ugo"
+tags = ["matched_basket"]
+
+[[apps]]
+app_id = 1072040
+name = "Panzer Corps 2"
+genre = "Wargame"
+cohort = "turn_structure"
+subgroup = "igo_ugo"
+tags = ["matched_basket"]
+
+[[apps]]
+app_id = 809230
+name = "Unity of Command II"
+genre = "Wargame"
+cohort = "turn_structure"
+subgroup = "igo_ugo"
+tags = ["matched_basket"]
+
+[[apps]]
+app_id = 312450
+name = "Order of Battle: World War II"
+genre = "Wargame"
+cohort = "turn_structure"
+subgroup = "igo_ugo"
+tags = ["matched_basket"]
+
+[[apps]]
+app_id = 1775550
+name = "Gary Grigsby's War in the East 2"
+genre = "Wargame"
+cohort = "turn_structure"
+subgroup = "igo_ugo"
+tags = []
+
+[[apps]]
+app_id = 365360
+name = "Battle Brothers"
+genre = "Tactical RPG"
+cohort = "turn_structure"
+subgroup = "alternating"
+tags = []
+
+[[apps]]
+app_id = 637090
+name = "BattleTech"
+genre = "Tactics"
+cohort = "turn_structure"
+subgroup = "alternating"
+tags = []
+
+[[apps]]
+app_id = 435150
+name = "Divinity: Original Sin 2"
+genre = "RPG"
+cohort = "turn_structure"
+subgroup = "alternating"
+tags = []
+
+[[apps]]
+app_id = 1086940
+name = "Baldur's Gate 3"
+genre = "RPG"
+cohort = "turn_structure"
+subgroup = "alternating"
+tags = []
+
+[[apps]]
+app_id = 867210
+name = "Songs of Conquest"
+genre = "Strategy"
+cohort = "turn_structure"
+subgroup = "alternating"
+tags = ["matched_basket"]
+
+[[apps]]
+app_id = 699170
+name = "Fell Seal: Arbiter's Mark"
+genre = "Tactical RPG"
+cohort = "turn_structure"
+subgroup = "alternating"
+tags = ["matched_basket"]
+
+[[apps]]
+app_id = 1004640
+name = "Final Fantasy Tactics: The Ivalice Chronicles"
+genre = "Tactical RPG"
+cohort = "turn_structure"
+subgroup = "alternating"
+tags = ["matched_basket"]
+
+[[apps]]
+app_id = 1369370
+name = "Combat Mission: Shock Force 2"
+genre = "Wargame"
+cohort = "turn_structure"
+subgroup = "wego"
+tags = []
+
+[[apps]]
+app_id = 2297010
+name = "Combat Mission: Battle for Normandy"
+genre = "Wargame"
+cohort = "turn_structure"
+subgroup = "wego"
+tags = []
+
+[[apps]]
+app_id = 98200
+name = "Frozen Synapse"
+genre = "Tactics"
+cohort = "turn_structure"
+subgroup = "wego"
+tags = ["matched_basket"]
+
+[[apps]]
+app_id = 445020
+name = "Frozen Synapse 2"
+genre = "Tactics"
+cohort = "turn_structure"
+subgroup = "wego"
+tags = []
+
+[[apps]]
+app_id = 553540
+name = "Phantom Brigade"
+genre = "Tactics"
+cohort = "turn_structure"
+subgroup = "wego"
+tags = ["matched_basket"]
+
+[[apps]]
+app_id = 2366530
+name = "Flashpoint Campaigns: Southern Storm"
+genre = "Wargame"
+cohort = "turn_structure"
+subgroup = "wego"
+tags = []
+
+[[apps]]
+app_id = 402570
+name = "Atlas Reactor"
+genre = "Tactics"
+cohort = "turn_structure"
+subgroup = "wego"
+tags = ["stand_in"]
+
+[[apps]]
+app_id = 722060
+name = "Dominions 5: Warriors of the Faith"
+genre = "Strategy"
+cohort = "turn_structure"
+subgroup = "wego"
+tags = ["stand_in"]
+
+[[apps]]
+app_id = 375450
+name = "Nobunaga's Ambition: Sphere of Influence - Ascension"
+genre = "Grand strategy"
+cohort = "historical_peer"
+subgroup = ""
+tags = []
+
+[[apps]]
+app_id = 577230
+name = "Three Kingdoms: The Last Warlord"
+genre = "Grand strategy"
+cohort = "historical_peer"
+subgroup = ""
+tags = []
+
+[[apps]]
+app_id = 2288150
+name = "Romance of the Three Kingdoms 8 Remake"
+genre = "Grand strategy"
+cohort = "historical_peer"
+subgroup = ""
+tags = []
+
+[[apps]]
+app_id = 628060
+name = "Romance of the Three Kingdoms X with Power Up Kit"
+genre = "Grand strategy"
+cohort = "historical_peer"
+subgroup = ""
+tags = []
+
+[[apps]]
+app_id = 289070
+name = "Civilization VI"
+genre = "4X"
+cohort = "anchor"
+subgroup = ""
+tags = []
+
+[[apps]]
+app_id = 281990
+name = "Stellaris"
+genre = "4X"
+cohort = "anchor"
+subgroup = ""
+tags = []
+
+[[apps]]
+app_id = 1142710
+name = "Total War: WARHAMMER III"
+genre = "Strategy"
+cohort = "anchor"
+subgroup = ""
+tags = []

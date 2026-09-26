@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import random
 import sqlite3
 import sys
 from pathlib import Path
@@ -11,6 +12,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from src.study import DEFAULT_STUDY_PATH, Study, load_study
 from src.utils import (
     FULL_DB_PATH,
     GAME_CATALOG,
@@ -99,6 +101,162 @@ def create_tables(conn: sqlite3.Connection) -> None:
     logger.info(
         "Schema ensured (metadata, documents, nlp_results, processed_documents, topics)."
     )
+
+
+# Study tables. Kept apart from _SCHEMA_SQL so that stages run against the
+# April seed never add tables to it (its sha256 is frozen after Phase 7.0).
+_STUDY_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS study_apps (
+    app_id        INTEGER PRIMARY KEY REFERENCES metadata(app_id),
+    cohort        TEXT NOT NULL,
+    subgroup      TEXT NOT NULL DEFAULT '',
+    tags          TEXT NOT NULL DEFAULT '[]',
+    display_order INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS pull_runs (
+    run_id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    app_id                  INTEGER NOT NULL REFERENCES metadata(app_id),
+    params                  TEXT NOT NULL,
+    baseline_params         TEXT,
+    pulled_at               TEXT NOT NULL,
+    pages                   INTEGER NOT NULL,
+    reviews_collected       INTEGER NOT NULL,
+    cap                     INTEGER NOT NULL,
+    cap_hit                 BOOLEAN NOT NULL,
+    stop_reason             TEXT NOT NULL,
+    effective_window_start  INTEGER,
+    effective_window_end    INTEGER,
+    total_positive          INTEGER,
+    total_negative          INTEGER,
+    total_reviews           INTEGER,
+    baseline_total_positive INTEGER,
+    baseline_total_negative INTEGER,
+    baseline_total_reviews  INTEGER,
+    UNIQUE (app_id, pulled_at)
+);
+
+CREATE TABLE IF NOT EXISTS review_language (
+    document_id    INTEGER PRIMARY KEY REFERENCES documents(id),
+    steam_language TEXT,
+    detected_lang  TEXT,
+    confidence     REAL
+);
+
+CREATE TABLE IF NOT EXISTS analysis_runs (
+    run_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    stage      TEXT NOT NULL,
+    params     TEXT NOT NULL,
+    git_sha    TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    metrics    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS aspect_mentions (
+    document_id     INTEGER NOT NULL REFERENCES documents(id),
+    aspect          TEXT NOT NULL,
+    sentence_idx    INTEGER NOT NULL,
+    matched_term    TEXT NOT NULL,
+    char_start      INTEGER NOT NULL,
+    char_end        INTEGER NOT NULL,
+    lexicon_version TEXT NOT NULL,
+    PRIMARY KEY (document_id, aspect, sentence_idx, lexicon_version)
+);
+
+CREATE TABLE IF NOT EXISTS game_stats (
+    run_id                 INTEGER NOT NULL REFERENCES analysis_runs(run_id),
+    app_id                 INTEGER NOT NULL REFERENCES metadata(app_id),
+    n_pulled               INTEGER,
+    n_seed                 INTEGER NOT NULL,
+    n_too_short            INTEGER NOT NULL,
+    n_too_few_tokens       INTEGER NOT NULL,
+    n_non_english          INTEGER NOT NULL,
+    n_kept                 INTEGER NOT NULL,
+    n_recommended          INTEGER NOT NULL,
+    n_not_recommended      INTEGER NOT NULL,
+    seed_rec_share         REAL,
+    seed_rec_ci_low        REAL,
+    seed_rec_ci_high       REAL,
+    rec_share              REAL,
+    rec_ci_low             REAL,
+    rec_ci_high            REAL,
+    pop_share_english      REAL,
+    pop_share_all          REAL,
+    window_start           INTEGER,
+    window_end             INTEGER,
+    cap_hit                BOOLEAN,
+    median_hours_rec       REAL,
+    median_hours_not_rec   REAL,
+    early_access_share     REAL,
+    mean_compound          REAL,
+    vader_pos_share        REAL,
+    eligible               BOOLEAN NOT NULL,
+    PRIMARY KEY (run_id, app_id)
+);
+
+CREATE TABLE IF NOT EXISTS cohort_stats (
+    run_id               INTEGER NOT NULL REFERENCES analysis_runs(run_id),
+    scope_type           TEXT NOT NULL,
+    scope_id             TEXT NOT NULL,
+    n_games              INTEGER NOT NULL,
+    n_eligible           INTEGER NOT NULL,
+    n_kept               INTEGER NOT NULL,
+    macro_rec_share      REAL,
+    macro_rec_ci_low     REAL,
+    macro_rec_ci_high    REAL,
+    pooled_rec_share     REAL,
+    median_hours_rec     REAL,
+    median_hours_not_rec REAL,
+    macro_mean_compound  REAL,
+    macro_compound_ci_low  REAL,
+    macro_compound_ci_high REAL,
+    PRIMARY KEY (run_id, scope_type, scope_id)
+);
+
+CREATE TABLE IF NOT EXISTS theme_stats (
+    run_id          INTEGER NOT NULL REFERENCES analysis_runs(run_id),
+    lens            TEXT NOT NULL,
+    theme           TEXT NOT NULL,
+    scope_type      TEXT NOT NULL,
+    scope_id        TEXT NOT NULL,
+    n_docs          INTEGER NOT NULL,
+    k_docs          INTEGER NOT NULL,
+    share           REAL,
+    share_ci_low    REAL,
+    share_ci_high   REAL,
+    complaint_share REAL,
+    complaint_ci_low  REAL,
+    complaint_ci_high REAL,
+    praise_share    REAL,
+    praise_ci_low   REAL,
+    praise_ci_high  REAL,
+    lift            REAL,
+    lift_ci_low     REAL,
+    lift_ci_high    REAL,
+    rec_share_in_theme REAL,
+    mean_compound   REAL,
+    vader_pos_share REAL,
+    logo_stable     BOOLEAN,  -- NULL where the theme failed the precision gate
+    finding         TEXT,
+    PRIMARY KEY (run_id, lens, theme, scope_type, scope_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_aspect_mentions_aspect ON aspect_mentions(aspect);
+CREATE INDEX IF NOT EXISTS idx_theme_stats_scope ON theme_stats(run_id, scope_type, scope_id);
+"""
+
+
+def create_study_tables(conn: sqlite3.Connection) -> None:
+    """Create the base tables plus the study provenance tables.
+
+    Used only for study databases (never the April seed), so the April
+    seed's file hash stays fixed.
+
+    Args:
+        conn: Active SQLite connection.
+    """
+    create_tables(conn)
+    conn.executescript(_STUDY_SCHEMA_SQL)
 
 
 def load_raw_json(json_path: Path) -> list[dict]:
@@ -260,6 +418,288 @@ def build_seed_db(full_conn: sqlite3.Connection, reviews_per_game: int = 200) ->
         seed_conn.close()
 
 
+# ---------------------------------------------------------------------------
+# Study (natural sampling) loading
+# ---------------------------------------------------------------------------
+
+_DOC_COLUMNS: str = """steam_review_id, app_id, review_text, recommended,
+    playtime_at_review, playtime_forever, timestamp_created,
+    helpful_votes, funny_votes, early_access"""
+
+
+def insert_study_apps(conn: sqlite3.Connection, study: Study) -> None:
+    """Write metadata and study_apps rows for every app in a study.
+
+    Args:
+        conn: Active SQLite connection with study tables created.
+        study: The study.
+    """
+    for order, app in enumerate(study.apps):
+        conn.execute(
+            "INSERT OR IGNORE INTO metadata (app_id, app_name, genre) VALUES (?, ?, ?)",
+            (app.app_id, app.name, app.genre),
+        )
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO study_apps (app_id, cohort, subgroup, tags, display_order)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (app.app_id, app.cohort, app.subgroup, json.dumps(list(app.tags)), order),
+        )
+    conn.commit()
+
+
+def insert_pull_run(conn: sqlite3.Connection, manifest: dict) -> None:
+    """Record one census pull manifest in pull_runs (idempotent).
+
+    Args:
+        conn: Active SQLite connection with study tables created.
+        manifest: Manifest dict written by ``data_pull.census_pull``.
+    """
+    summary = manifest.get("query_summary") or {}
+    base = manifest.get("baseline_summary") or {}
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO pull_runs
+            (app_id, params, baseline_params, pulled_at, pages, reviews_collected,
+             cap, cap_hit, stop_reason, effective_window_start, effective_window_end,
+             total_positive, total_negative, total_reviews,
+             baseline_total_positive, baseline_total_negative, baseline_total_reviews)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            manifest["app_id"],
+            json.dumps(manifest["params"], sort_keys=True),
+            json.dumps(manifest.get("baseline_params"), sort_keys=True),
+            manifest["finished_at"],
+            manifest["pages"],
+            manifest["reviews_collected"],
+            manifest["cap"],
+            bool(manifest["cap_hit"]),
+            manifest["stop_reason"],
+            manifest.get("effective_window_start"),
+            manifest.get("effective_window_end"),
+            summary.get("total_positive"),
+            summary.get("total_negative"),
+            summary.get("total_reviews"),
+            base.get("total_positive"),
+            base.get("total_negative"),
+            base.get("total_reviews"),
+        ),
+    )
+
+
+def insert_steam_languages(conn: sqlite3.Connection, reviews: list[dict]) -> None:
+    """Record each review's reviewer-declared Steam language.
+
+    Args:
+        conn: Active SQLite connection with study tables created.
+        reviews: Raw review dicts already inserted into documents.
+    """
+    rows = [
+        (r.get("language"), str(r.get("recommendationid", "")))
+        for r in reviews
+        if r.get("recommendationid")
+    ]
+    conn.executemany(
+        """
+        INSERT OR IGNORE INTO review_language (document_id, steam_language)
+        SELECT id, ? FROM documents WHERE steam_review_id = ?
+        """,
+        rows,
+    )
+
+
+def load_study_full(study: Study) -> int:
+    """Load every cached raw file of a study into its full database.
+
+    Raw files are located by app ID from the study (``<app_id>.json`` plus
+    the ``<app_id>.pull.json`` manifest), never by parsing file names.
+    Loading is idempotent: documents dedupe on ``steam_review_id`` and pull
+    runs on ``(app_id, pulled_at)``.
+
+    Args:
+        study: The study to load.
+
+    Returns:
+        Total document count in the full database after loading.
+    """
+    study.full_db.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(study.full_db)
+    try:
+        create_study_tables(conn)
+        insert_study_apps(conn, study)
+        for app in study.apps:
+            raw_path = study.raw_dir / f"{app.app_id}.json"
+            manifest_path = study.raw_dir / f"{app.app_id}.pull.json"
+            if not (raw_path.exists() and manifest_path.exists()):
+                logger.warning("No cached pull for %s (%d). Skipping.", app.name, app.app_id)
+                continue
+            reviews = load_raw_json(raw_path)
+            with open(manifest_path, encoding="utf-8") as f:
+                manifest = json.load(f)
+            conn.execute("BEGIN")
+            insert_documents(conn, reviews, app.app_id, app.name)
+            insert_steam_languages(conn, reviews)
+            insert_pull_run(conn, manifest)
+            conn.commit()
+        total = conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+        logger.info("Study %s full DB: %d documents.", study.name, total)
+        return total
+    finally:
+        conn.close()
+
+
+def build_natural_seed(
+    full_conn: sqlite3.Connection,
+    seed_path: Path,
+    cap_per_game: int,
+    random_seed: int,
+) -> dict[int, int]:
+    """Write a uniform random per-game sample of the full DB to a new seed DB.
+
+    Each game contributes ``min(n, cap_per_game)`` reviews drawn uniformly
+    without regard to the recommend flag, so the seed keeps each game's
+    natural recommend rate. Games below the cap are included whole. The draw
+    is deterministic: review IDs are sorted before sampling with a per-game
+    RNG seeded from ``random_seed`` and the app ID. Metadata, study_apps,
+    pull_runs and review_language rows are copied for the sampled reviews.
+
+    Args:
+        full_conn: Connection to the study's full database (source).
+        seed_path: Destination seed DB path. An existing file is replaced.
+        cap_per_game: Maximum reviews per game.
+        random_seed: Base seed for the per-game samples.
+
+    Returns:
+        ``{app_id: sampled_count}``.
+    """
+    if seed_path.exists():
+        seed_path.unlink()
+    seed_path.parent.mkdir(parents=True, exist_ok=True)
+
+    seed_conn = sqlite3.connect(seed_path)
+    counts: dict[int, int] = {}
+    try:
+        create_study_tables(seed_conn)
+        for table in ("metadata", "study_apps", "pull_runs"):
+            cols = [r[1] for r in full_conn.execute(f"PRAGMA table_info({table})")]
+            rows = full_conn.execute(f"SELECT {', '.join(cols)} FROM {table}").fetchall()
+            placeholders = ", ".join("?" * len(cols))
+            seed_conn.executemany(
+                f"INSERT OR IGNORE INTO {table} ({', '.join(cols)}) VALUES ({placeholders})",
+                rows,
+            )
+
+        app_ids = [
+            r[0]
+            for r in full_conn.execute("SELECT DISTINCT app_id FROM documents ORDER BY app_id")
+        ]
+        for app_id in app_ids:
+            ids = sorted(
+                r[0]
+                for r in full_conn.execute(
+                    "SELECT steam_review_id FROM documents WHERE app_id = ?", (app_id,)
+                )
+            )
+            rng = random.Random(f"{random_seed}:{app_id}")
+            chosen = sorted(rng.sample(ids, min(len(ids), cap_per_game)))
+            rows = []
+            for start in range(0, len(chosen), 500):
+                chunk = chosen[start : start + 500]
+                marks = ",".join("?" * len(chunk))
+                rows.extend(
+                    full_conn.execute(
+                        f"SELECT {_DOC_COLUMNS} FROM documents "
+                        f"WHERE steam_review_id IN ({marks}) ORDER BY steam_review_id",
+                        chunk,
+                    ).fetchall()
+                )
+            seed_conn.executemany(
+                f"INSERT OR IGNORE INTO documents ({_DOC_COLUMNS}) "
+                f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+            lang_rows = []
+            for start in range(0, len(chosen), 500):
+                chunk = chosen[start : start + 500]
+                marks = ",".join("?" * len(chunk))
+                lang_rows.extend(
+                    full_conn.execute(
+                        f"SELECT d.steam_review_id, l.steam_language FROM review_language l "
+                        f"JOIN documents d ON d.id = l.document_id "
+                        f"WHERE d.steam_review_id IN ({marks})",
+                        chunk,
+                    ).fetchall()
+                )
+            seed_conn.executemany(
+                """
+                INSERT OR IGNORE INTO review_language (document_id, steam_language)
+                SELECT id, ? FROM documents WHERE steam_review_id = ?
+                """,
+                [(lang, rid) for rid, lang in lang_rows],
+            )
+            counts[app_id] = len(chosen)
+        seed_conn.commit()
+        logger.info(
+            "Natural seed built: %d documents from %d games (cap %d, seed %d).",
+            sum(counts.values()),
+            len(counts),
+            cap_per_game,
+            random_seed,
+        )
+    finally:
+        seed_conn.close()
+    return counts
+
+
+def vacuum(db_path: Path) -> float:
+    """VACUUM a database file and return its size in MB.
+
+    Args:
+        db_path: SQLite file to compact.
+
+    Returns:
+        File size in megabytes after VACUUM.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("VACUUM")
+    finally:
+        conn.close()
+    return db_path.stat().st_size / (1024 * 1024)
+
+
+def main_study(study: Study, full: bool) -> None:
+    """Study entry point: load raw pulls into the full DB and build the seed.
+
+    Args:
+        study: A natural-sampling study.
+        full: If False, only report the seed's document count.
+    """
+    if not full:
+        if study.seed_db.exists():
+            conn = sqlite3.connect(study.seed_db)
+            count = conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+            conn.close()
+            logger.info("Seed DB %s has %d documents. Nothing to do.", study.seed_db, count)
+        else:
+            logger.error("No seed DB at %s. Run with --full first.", study.seed_db)
+        return
+    load_study_full(study)
+    full_conn = sqlite3.connect(study.full_db)
+    try:
+        build_natural_seed(
+            full_conn,
+            study.seed_db,
+            study.sampling.seed_cap_per_game,
+            study.sampling.random_seed,
+        )
+    finally:
+        full_conn.close()
+    logger.info("Seed DB size after VACUUM: %.2f MB", vacuum(study.seed_db))
+
+
 def main(mode: str = "seed") -> None:
     """Entry point. Creates tables and loads data in the given mode.
 
@@ -338,5 +778,15 @@ if __name__ == "__main__":
         action="store_true",
         help="Load all raw JSON into full.db and generate seed.db. Default is seed mode.",
     )
+    parser.add_argument(
+        "--study",
+        type=Path,
+        default=DEFAULT_STUDY_PATH,
+        help="Study TOML file (default: the April 2026 baseline).",
+    )
     args = parser.parse_args()
-    main(mode="full" if args.full else "seed")
+    selected = load_study(args.study)
+    if selected.sampling.method == "natural":
+        main_study(selected, full=args.full)
+    else:
+        main(mode="full" if args.full else "seed")

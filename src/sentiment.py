@@ -23,6 +23,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from src.db_setup import create_tables
+from src.study import DEFAULT_STUDY_PATH, Study, load_study
 from src.utils import (
     MIN_TOKEN_COUNT,
     VADER_POSITIVE_THRESHOLD,
@@ -269,6 +270,7 @@ def run(
     mode: str = "seed",
     rebuild: bool = False,
     batch_size: int = 500,
+    study: Study | None = None,
 ) -> None:
     """End-to-end sentiment scoring on the chosen DB.
 
@@ -285,11 +287,12 @@ def run(
         mode: 'seed' or 'full'.
         rebuild: If True, wipe nlp_results before re-scoring.
         batch_size: Number of rows per batch for scoring and writing.
+        study: Study whose databases to use. None means the April baseline.
 
     Raises:
         FileNotFoundError: If the target database does not exist.
     """
-    db_path = get_db_path(mode)
+    db_path = get_db_path(mode) if study is None else get_db_path(mode, study)
     if not db_path.exists():
         raise FileNotFoundError(
             f"{db_path} does not exist. Run db_setup.py --full first."
@@ -397,7 +400,7 @@ def run(
 
 
 def main() -> None:
-    """CLI entry point. Parses ``--full`` and ``--rebuild`` flags, calls run()."""
+    """CLI entry point. Parses ``--full``, ``--rebuild`` and ``--study``, calls run()."""
     parser = argparse.ArgumentParser(
         description="Score Steam reviews with VADER sentiment analysis."
     )
@@ -417,11 +420,19 @@ def main() -> None:
         default=500,
         help="Batch size for scoring and writing (default: 500).",
     )
+    parser.add_argument(
+        "--study",
+        type=Path,
+        default=DEFAULT_STUDY_PATH,
+        help="Study TOML file (default: the April 2026 baseline).",
+    )
     args = parser.parse_args()
+    study = load_study(args.study)
     run(
         mode="full" if args.full else "seed",
         rebuild=args.rebuild,
         batch_size=args.batch_size,
+        study=None if study.name == "april_2026_baseline" else study,
     )
 
 

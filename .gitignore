@@ -2,9 +2,13 @@
 .env
 *.key
 
-# Data — only seed.db is committed; raw API cache and full DB are local only
+# Data: seed.db and market_seed.db are committed; raw API caches and full DBs stay local
 data/raw/
 data/full.db
+data/market_full.db
+
+# Private planning documents
+docs/private_docs/
 
 # Notebooks — uncommitted until narrative is written
 notebooks/

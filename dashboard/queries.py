@@ -7,6 +7,7 @@ Sentinels (reviews with token_count < MIN_TOKEN_COUNT) are excluded from every
 query via the shared ``_build_where`` helper.
 """
 
+import json
 import sqlite3
 import sys
 from pathlib import Path
@@ -48,6 +49,8 @@ def _build_where(
     topic_ids: list[int] | None = None,
     date_start: int | None = None,
     date_end: int | None = None,
+    cohorts: list[str] | None = None,
+    aspects: list[str] | None = None,
 ) -> tuple[str, list[Any]]:
     """Build a WHERE clause and parameter list from active filters.
 
@@ -64,12 +67,30 @@ def _build_where(
         topic_ids: Topic ID integers to include.
         date_start: Unix-timestamp lower bound (inclusive).
         date_end: Unix-timestamp upper bound (inclusive).
+        cohorts: Study cohorts to include (study databases only).
+        aspects: Aspect names; keeps reviews with at least one mention
+            (study databases only).
 
     Returns:
         A ``(where_clause, params)`` tuple ready to splice into a query.
     """
     clauses: list[str] = ["p.token_count >= ?"]
     params: list[Any] = [MIN_TOKEN_COUNT]
+
+    if cohorts:
+        placeholders = ",".join("?" * len(cohorts))
+        clauses.append(
+            f"d.app_id IN (SELECT app_id FROM study_apps WHERE cohort IN ({placeholders}))"
+        )
+        params.extend(cohorts)
+
+    if aspects:
+        placeholders = ",".join("?" * len(aspects))
+        clauses.append(
+            "n.document_id IN (SELECT document_id FROM aspect_mentions "
+            f"WHERE aspect IN ({placeholders}))"
+        )
+        params.extend(aspects)
 
     if genres:
         placeholders = ",".join("?" * len(genres))
@@ -490,3 +511,271 @@ def get_reviews_count(
     """
     cur = conn.execute(sql, params)
     return cur.fetchone()[0]
+
+
+# ---------------------------------------------------------------------------
+# Study (market analysis) queries over precomputed tables
+# ---------------------------------------------------------------------------
+
+
+def has_study_tables(conn: sqlite3.Connection) -> bool:
+    """Return whether the database carries study statistics tables.
+
+    Args:
+        conn: Open SQLite connection.
+
+    Returns:
+        True if ``game_stats`` exists and has at least one row.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'game_stats'"
+    ).fetchone()
+    if row is None:
+        return False
+    return conn.execute("SELECT 1 FROM game_stats LIMIT 1").fetchone() is not None
+
+
+def get_latest_run(conn: sqlite3.Connection, stage: str = "stats") -> tuple[int, dict] | None:
+    """Return the newest analysis run of a stage and its metrics.
+
+    Args:
+        conn: Open SQLite connection.
+        stage: ``stats`` or ``reference_checks``.
+
+    Returns:
+        ``(run_id, metrics_dict)`` or None if no run exists.
+    """
+    row = conn.execute(
+        "SELECT run_id, metrics FROM analysis_runs WHERE stage = ? ORDER BY run_id DESC LIMIT 1",
+        (stage,),
+    ).fetchone()
+    if row is None:
+        return None
+    return int(row[0]), json.loads(row[1])
+
+
+def get_cohort_options(conn: sqlite3.Connection) -> list[str]:
+    """Return the study's cohorts in display order.
+
+    Args:
+        conn: Open SQLite connection.
+
+    Returns:
+        Cohort names.
+    """
+    return [
+        r[0]
+        for r in conn.execute(
+            "SELECT cohort FROM study_apps GROUP BY cohort ORDER BY MIN(display_order)"
+        )
+    ]
+
+
+def get_game_stats(conn: sqlite3.Connection, run_id: int) -> pd.DataFrame:
+    """Return per-game statistics with names, cohorts and tags.
+
+    Args:
+        conn: Open SQLite connection.
+        run_id: Stats run.
+
+    Returns:
+        DataFrame of ``game_stats`` columns plus ``app_name``, ``cohort``,
+        ``subgroup``, ``tags`` and ``display_order``.
+    """
+    sql = """
+        SELECT g.*, m.app_name, s.cohort, s.subgroup, s.tags, s.display_order
+        FROM game_stats g
+        JOIN metadata m ON m.app_id = g.app_id
+        JOIN study_apps s ON s.app_id = g.app_id
+        WHERE g.run_id = ?
+        ORDER BY s.display_order
+    """
+    return pd.read_sql_query(sql, conn, params=[run_id])
+
+
+def get_cohort_stats(conn: sqlite3.Connection, run_id: int) -> pd.DataFrame:
+    """Return cohort, subgroup and matched-basket statistics.
+
+    Args:
+        conn: Open SQLite connection.
+        run_id: Stats run.
+
+    Returns:
+        DataFrame of ``cohort_stats`` rows.
+    """
+    return pd.read_sql_query(
+        "SELECT * FROM cohort_stats WHERE run_id = ? ORDER BY scope_type, scope_id",
+        conn,
+        params=[run_id],
+    )
+
+
+def get_theme_stats(
+    conn: sqlite3.Connection,
+    run_id: int,
+    lens: str,
+    scope_type: str,
+) -> pd.DataFrame:
+    """Return theme statistics for one lens and scope type.
+
+    Game-scope rows carry ``app_name``; topic rows carry the topic ``label``.
+
+    Args:
+        conn: Open SQLite connection.
+        run_id: Stats run.
+        lens: ``topic`` or ``aspect``.
+        scope_type: ``game``, ``cohort``, ``subgroup``, ``subgroup_matched`` or ``all``.
+
+    Returns:
+        DataFrame of ``theme_stats`` rows plus ``app_name`` and ``topic_label``.
+    """
+    sql = """
+        SELECT t.*, m.app_name, tp.label AS topic_label
+        FROM theme_stats t
+        LEFT JOIN metadata m
+               ON t.scope_type = 'game' AND m.app_id = CAST(t.scope_id AS INTEGER)
+        LEFT JOIN topics tp
+               ON t.lens = 'topic' AND tp.topic_id = CAST(t.theme AS INTEGER)
+        WHERE t.run_id = ? AND t.lens = ? AND t.scope_type = ?
+        ORDER BY t.scope_id, t.theme
+    """
+    return pd.read_sql_query(sql, conn, params=[run_id, lens, scope_type])
+
+
+def get_filtered_theme_points(
+    conn: sqlite3.Connection,
+    lens: str,
+    **filters: Any,
+) -> pd.DataFrame:
+    """Return pooled point estimates per theme for the current filters (no intervals).
+
+    Used when sidebar filters are active and precomputed intervals no longer
+    apply.
+
+    Args:
+        conn: Open SQLite connection.
+        lens: ``topic`` or ``aspect``.
+        **filters: Keyword arguments forwarded to ``_build_where``.
+
+    Returns:
+        DataFrame with ``theme``, ``k_docs``, ``n_docs``, ``share``,
+        ``complaint_share``, ``praise_share``, ``mean_compound``.
+    """
+    where, params = _build_where(**filters)
+    if lens == "aspect":
+        theme_sql = """
+            SELECT DISTINCT a.document_id, a.aspect AS theme
+            FROM aspect_mentions a
+        """
+    else:
+        theme_sql = """
+            SELECT n2.document_id, CAST(n2.topic_id AS TEXT) AS theme
+            FROM nlp_results n2 WHERE n2.topic_id != -1
+        """
+    sql = f"""
+        WITH scoped AS (
+            SELECT n.document_id, d.recommended, n.sentiment_compound
+            {_BASE_FROM}
+            WHERE {where}
+        ),
+        totals AS (
+            SELECT COUNT(*) AS n_docs,
+                   SUM(recommended) AS n_rec,
+                   SUM(1 - recommended) AS n_not
+            FROM scoped
+        )
+        SELECT th.theme,
+               COUNT(*) AS k_docs,
+               (SELECT n_docs FROM totals) AS n_docs,
+               COUNT(*) * 1.0 / MAX((SELECT n_docs FROM totals), 1) AS share,
+               SUM(1 - s.recommended) * 1.0 / MAX((SELECT n_not FROM totals), 1)
+                   AS complaint_share,
+               SUM(s.recommended) * 1.0 / MAX((SELECT n_rec FROM totals), 1) AS praise_share,
+               AVG(s.sentiment_compound) AS mean_compound
+        FROM scoped s
+        JOIN ({theme_sql}) th ON th.document_id = s.document_id
+        GROUP BY th.theme
+        ORDER BY k_docs DESC
+    """
+    return pd.read_sql_query(sql, conn, params=params)
+
+
+def get_aspect_examples(
+    conn: sqlite3.Connection,
+    aspect: str,
+    limit: int = 5,
+    **filters: Any,
+) -> pd.DataFrame:
+    """Return example sentences for an aspect, newest reviews first.
+
+    Args:
+        conn: Open SQLite connection.
+        aspect: Aspect name.
+        limit: Maximum sentences.
+        **filters: Keyword arguments forwarded to ``_build_where``.
+
+    Returns:
+        DataFrame with ``app_name``, ``recommended``, ``sentence``.
+    """
+    where, params = _build_where(**filters)
+    sql = f"""
+        SELECT m.app_name, d.recommended,
+               SUBSTR(p.cleaned_text, a.char_start + 1, a.char_end - a.char_start) AS sentence
+        {_BASE_FROM}
+        JOIN aspect_mentions a ON a.document_id = n.document_id
+        WHERE {where} AND a.aspect = ?
+        ORDER BY d.timestamp_created DESC
+        LIMIT ?
+    """
+    return pd.read_sql_query(sql, conn, params=[*params, aspect, limit])
+
+
+def get_pull_windows(conn: sqlite3.Connection) -> pd.DataFrame:
+    """Return the latest pull per app with its window and population totals.
+
+    Args:
+        conn: Open SQLite connection.
+
+    Returns:
+        DataFrame with app name, pull counts, cap flag, stop reason, window
+        bounds and ``query_summary`` totals.
+    """
+    sql = """
+        SELECT m.app_name, r.reviews_collected, r.cap_hit, r.stop_reason,
+               r.effective_window_start, r.effective_window_end,
+               r.total_reviews, r.total_positive,
+               r.baseline_total_reviews, r.baseline_total_positive, r.pulled_at
+        FROM pull_runs r
+        JOIN metadata m ON m.app_id = r.app_id
+        JOIN study_apps s ON s.app_id = r.app_id
+        WHERE r.run_id IN (SELECT MAX(run_id) FROM pull_runs GROUP BY app_id)
+        ORDER BY s.display_order
+    """
+    return pd.read_sql_query(sql, conn)
+
+
+def get_recommend_share_by_game(
+    conn: sqlite3.Connection,
+    **filters: Any,
+) -> pd.DataFrame:
+    """Return per-game recommend share, review count and mean VADER for the filters.
+
+    Args:
+        conn: Open SQLite connection.
+        **filters: Keyword arguments forwarded to ``_build_where``.
+
+    Returns:
+        DataFrame with ``app_name``, ``n``, ``rec_share``, ``mean_compound``.
+    """
+    where, params = _build_where(**filters)
+    sql = f"""
+        SELECT m.app_name,
+               COUNT(*)                  AS n,
+               AVG(d.recommended)        AS rec_share,
+               AVG(n.sentiment_compound) AS mean_compound
+        {_BASE_FROM}
+        WHERE {where}
+        GROUP BY m.app_name
+        ORDER BY rec_share DESC
+    """
+    return pd.read_sql_query(sql, conn, params=params)

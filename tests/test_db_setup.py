@@ -7,7 +7,10 @@ from pathlib import Path
 import pytest
 
 from src.db_setup import create_tables, insert_documents, insert_metadata, load_raw_json, main
-from src.utils import SEED_DB_PATH
+from src.study import Study
+from src.utils import DATA_DIR, SEED_DB_PATH
+
+MARKET_SEED_DB_PATH: Path = DATA_DIR / "market_seed.db"
 
 
 def _make_in_memory_db() -> sqlite3.Connection:
@@ -110,6 +113,14 @@ def test_insert_documents_skips_empty_text() -> None:
     conn.close()
 
     assert count == 1, f"Expected 1 row (empty review skipped), got {count}"
+
+
+def test_committed_dbs_under_25mb() -> None:
+    """Verify the committed databases together stay under 25 MB."""
+    total_mb = sum(
+        p.stat().st_size for p in (SEED_DB_PATH, MARKET_SEED_DB_PATH) if p.exists()
+    ) / (1024 * 1024)
+    assert total_mb < 25, f"committed DBs total {total_mb:.2f} MB, exceeds 25 MB limit"
 
 
 def test_seed_db_under_25mb() -> None:
@@ -222,3 +233,133 @@ def test_load_raw_json_unknown_structure(tmp_path: Path) -> None:
     result = load_raw_json(json_path)
 
     assert result == []
+
+
+# ---------------------------------------------------------------------------
+# Study loading and natural seed
+# ---------------------------------------------------------------------------
+
+
+def _study(tmp_path: Path, app_ids: tuple[int, ...] = (1,)) -> Study:
+    """Build a natural study whose files live under tmp_path.
+
+    Args:
+        tmp_path: pytest temporary directory.
+        app_ids: App IDs to include.
+
+    Returns:
+        A Study instance.
+    """
+    from src.study import AppSpec, Sampling, Study
+
+    return Study(
+        name="t",
+        title="t",
+        seed_db=tmp_path / "seed.db",
+        full_db=tmp_path / "full.db",
+        raw_dir=tmp_path / "raw",
+        language_filter=False,
+        aspect_lexicon=None,
+        sampling=Sampling("natural", "recent", "english", "all", "all", 1, 100, 1000, 100, 42),
+        baseline=None,
+        apps=tuple(AppSpec(a, f"Game {a}", "Tactics", "c", "", ()) for a in app_ids),
+    )
+
+
+def _write_pull(raw_dir: Path, app_id: int, ids: list[int], finished_at: str) -> None:
+    """Write a synthetic raw file and manifest for one app.
+
+    Args:
+        raw_dir: Study raw directory.
+        app_id: App ID.
+        ids: Review IDs to include.
+        finished_at: Manifest finish time (distinguishes pulls).
+    """
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    reviews = [
+        {"recommendationid": str(i), "review": f"review {i}", "voted_up": i % 2 == 0,
+         "language": "english", "timestamp_created": 1000 + i, "author": {}}
+        for i in ids
+    ]
+    (raw_dir / f"{app_id}.json").write_text(json.dumps(reviews), encoding="utf-8")
+    manifest = {
+        "app_id": app_id, "params": {}, "baseline_params": None, "finished_at": finished_at,
+        "pages": 1, "reviews_collected": len(ids), "cap": 1000, "cap_hit": False,
+        "stop_reason": "exhausted", "query_summary": {"total_reviews": len(ids)},
+    }
+    (raw_dir / f"{app_id}.pull.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+
+def test_load_study_full_is_idempotent_across_overlapping_pulls(tmp_path: Path) -> None:
+    """Loading twice, including an overlapping re-pull, inserts each review once."""
+    from src.db_setup import load_study_full
+
+    study = _study(tmp_path)
+    _write_pull(study.raw_dir, 1, [1, 2, 3], "2026-09-26T00:00:00")
+    assert load_study_full(study) == 3
+    assert load_study_full(study) == 3
+
+    _write_pull(study.raw_dir, 1, [2, 3, 4], "2026-09-27T00:00:00")
+    assert load_study_full(study) == 4
+
+    conn = sqlite3.connect(study.full_db)
+    runs = conn.execute("SELECT COUNT(*) FROM pull_runs").fetchone()[0]
+    langs = conn.execute("SELECT COUNT(*) FROM review_language").fetchone()[0]
+    conn.close()
+    assert runs == 2
+    assert langs == 4
+
+
+def _full_db_with_rates(path: Path, per_app: dict[int, tuple[int, int]]) -> sqlite3.Connection:
+    """Create a full DB with a given number of recommended and not-recommended reviews.
+
+    Args:
+        path: Database file path.
+        per_app: ``{app_id: (n_recommended, n_not_recommended)}``.
+
+    Returns:
+        Open connection to the new database.
+    """
+    from src.db_setup import create_study_tables
+
+    conn = sqlite3.connect(path)
+    create_study_tables(conn)
+    rid = 0
+    for app_id, (n_pos, n_neg) in per_app.items():
+        conn.execute("INSERT INTO metadata (app_id, app_name) VALUES (?, ?)", (app_id, f"G{app_id}"))
+        for flag, n in ((1, n_pos), (0, n_neg)):
+            for _ in range(n):
+                rid += 1
+                conn.execute(
+                    "INSERT INTO documents (steam_review_id, app_id, review_text, recommended) "
+                    "VALUES (?, ?, ?, ?)",
+                    (f"r{rid:06d}", app_id, "text", flag),
+                )
+    conn.commit()
+    return conn
+
+
+def test_build_natural_seed_keeps_natural_rate_and_is_deterministic(tmp_path: Path) -> None:
+    """A 90/10 game keeps ~90% recommended, reruns match, the cap binds, small games stay whole."""
+    from src.db_setup import build_natural_seed
+
+    full = _full_db_with_rates(tmp_path / "full.db", {1: (3600, 400), 2: (50, 30)})
+    seed = tmp_path / "seed.db"
+
+    counts = build_natural_seed(full, seed, cap_per_game=400, random_seed=42)
+    conn = sqlite3.connect(seed)
+    share = conn.execute(
+        "SELECT AVG(recommended) FROM documents WHERE app_id = 1"
+    ).fetchone()[0]
+    first = conn.execute("SELECT steam_review_id FROM documents ORDER BY 1").fetchall()
+    conn.close()
+
+    assert counts == {1: 400, 2: 80}
+    assert abs(share - 0.9) <= 0.05
+
+    build_natural_seed(full, seed, cap_per_game=400, random_seed=42)
+    conn = sqlite3.connect(seed)
+    second = conn.execute("SELECT steam_review_id FROM documents ORDER BY 1").fetchall()
+    conn.close()
+    full.close()
+    assert first == second

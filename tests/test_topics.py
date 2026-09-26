@@ -250,6 +250,18 @@ def test_get_topic_info_returns_all_topics(fitted_modeler: TopicModeler) -> None
     assert unique_model_topics.issubset(topic_ids_in_info)
 
 
+def test_vectorizer_excludes_stop_words(fitted_modeler: TopicModeler) -> None:
+    """Topic labels draw on a vocabulary without English or project stop words."""
+    from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
+
+    from src.utils import PROJECT_STOPWORDS
+
+    assert fitted_modeler.model is not None
+    vocab = set(fitted_modeler.model.vectorizer_model.get_feature_names_out())
+    assert vocab, "vectorizer vocabulary should not be empty"
+    assert not vocab & (ENGLISH_STOP_WORDS | PROJECT_STOPWORDS)
+
+
 def test_get_topic_info_has_required_keys(fitted_modeler: TopicModeler) -> None:
     """Each topic dict has topic_id, label, top_words, doc_count."""
     info = fitted_modeler.get_topic_info()

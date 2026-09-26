@@ -2,6 +2,10 @@
 
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.study import Study
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -65,6 +69,17 @@ These four tokens dominate Steam reviews (>80% frequency) and bury real topic
 signal. Filtered in `preprocessing.Preprocessor.tokenize_batch`.
 """
 
+LANGUAGE_MIN_CONFIDENCE: float = 0.50
+"""A review is dropped as non-English when another language is detected at this confidence."""
+
+DETECTOR_LANGUAGES: tuple[str, ...] = (
+    "BOKMAL", "BULGARIAN", "CHINESE", "CZECH", "DANISH", "DUTCH", "ENGLISH",
+    "FINNISH", "FRENCH", "GERMAN", "GREEK", "HUNGARIAN", "INDONESIAN", "ITALIAN",
+    "JAPANESE", "KOREAN", "POLISH", "PORTUGUESE", "ROMANIAN", "RUSSIAN",
+    "SPANISH", "SWEDISH", "THAI", "TURKISH", "UKRAINIAN", "VIETNAMESE",
+)
+"""Lingua languages matching Steam's review languages (Norwegian as Bokmal)."""
+
 # ---------------------------------------------------------------------------
 # Sentiment thresholds (Phase 3)
 # ---------------------------------------------------------------------------
@@ -117,11 +132,13 @@ def get_logger(name: str) -> logging.Logger:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def get_db_path(mode: str = "seed") -> Path:
+def get_db_path(mode: str = "seed", study: "Study | None" = None) -> Path:
     """Return the correct database path for the given mode.
 
     Args:
         mode: Either 'seed' or 'full'.
+        study: Optional study. When given, its ``seed_db`` or ``full_db``
+            is returned. When None, the April baseline paths are used.
 
     Returns:
         Path to the appropriate SQLite database file.
@@ -129,8 +146,8 @@ def get_db_path(mode: str = "seed") -> Path:
     Raises:
         ValueError: If mode is not 'seed' or 'full'.
     """
-    if mode == "seed":
-        return SEED_DB_PATH
-    if mode == "full":
-        return FULL_DB_PATH
-    raise ValueError(f"Unknown mode '{mode}'. Expected 'seed' or 'full'.")
+    if mode not in ("seed", "full"):
+        raise ValueError(f"Unknown mode '{mode}'. Expected 'seed' or 'full'.")
+    if study is not None:
+        return study.seed_db if mode == "seed" else study.full_db
+    return SEED_DB_PATH if mode == "seed" else FULL_DB_PATH

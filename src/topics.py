@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from bertopic import BERTopic
+from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS, CountVectorizer
 from umap import UMAP
 
 # Ensure project root is on sys.path so `src.*` imports work when run as a script.
@@ -26,17 +27,44 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from src.db_setup import create_tables
+from src.study import DEFAULT_STUDY_PATH, Study, load_study
 from src.utils import (
     BERTOPIC_EMBEDDING_MODEL,
     BERTOPIC_MIN_TOPIC_SIZE,
     BERTOPIC_RANDOM_STATE,
     MIN_TOKEN_COUNT,
     OUTPUTS_DIR,
+    PROJECT_STOPWORDS,
     get_db_path,
     get_logger,
 )
 
 logger = get_logger(__name__)
+
+UMAP_PRESETS: dict[str, dict[str, object]] = {
+    "legacy": {},
+    "bertopic_default": {
+        "n_neighbors": 15,
+        "n_components": 5,
+        "min_dist": 0.0,
+        "metric": "cosine",
+    },
+}
+"""UMAP settings by preset name; ``random_state`` is always added.
+
+``legacy`` is the April 2026 configuration (UMAP library defaults: 2
+components, euclidean). ``bertopic_default`` is BERTopic's documented
+default UMAP. In the September 2026 environment the legacy preset collapses
+most reviews into one cluster with no outliers, so new studies use
+``bertopic_default``.
+"""
+
+TOPIC_STOP_WORDS: list[str] = sorted(ENGLISH_STOP_WORDS | PROJECT_STOPWORDS)
+"""Words excluded from topic representations (c-TF-IDF labels).
+
+Embeddings still read ``cleaned_text`` with stop words intact; only the
+label vocabulary drops them, so labels name content words.
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -81,18 +109,21 @@ class TopicModeler:
         embedding_model: Name of the sentence-transformer model.
         min_topic_size: Minimum cluster size for HDBSCAN.
         random_state: UMAP random seed for reproducibility.
+        umap_preset: Key into ``UMAP_PRESETS``.
     """
 
     model: BERTopic | None
     embedding_model: str
     min_topic_size: int
     random_state: int
+    umap_preset: str
 
     def __init__(
         self,
         embedding_model: str = BERTOPIC_EMBEDDING_MODEL,
         min_topic_size: int = BERTOPIC_MIN_TOPIC_SIZE,
         random_state: int = BERTOPIC_RANDOM_STATE,
+        umap_preset: str = "legacy",
     ) -> None:
         """Initialize the topic modeler with configuration.
 
@@ -100,11 +131,13 @@ class TopicModeler:
             embedding_model: Sentence-transformer model name.
             min_topic_size: Minimum number of documents to form a topic.
             random_state: Random seed for UMAP dimensionality reduction.
+            umap_preset: Key into ``UMAP_PRESETS``.
         """
         self.model = None
         self.embedding_model = embedding_model
         self.min_topic_size = min_topic_size
         self.random_state = random_state
+        self.umap_preset = umap_preset
 
     def fit(self, texts: list[str]) -> list[int]:
         """Fit BERTopic on the corpus and return topic assignments.
@@ -115,10 +148,11 @@ class TopicModeler:
         Returns:
             List of topic IDs aligned with input. -1 means outlier.
         """
-        umap_model = UMAP(random_state=self.random_state)
+        umap_model = UMAP(random_state=self.random_state, **UMAP_PRESETS[self.umap_preset])
         self.model = BERTopic(
             embedding_model=self.embedding_model,
             umap_model=umap_model,
+            vectorizer_model=CountVectorizer(stop_words=TOPIC_STOP_WORDS),
             min_topic_size=self.min_topic_size,
             verbose=True,
         )
@@ -294,11 +328,27 @@ def write_topics_table(
 # ---------------------------------------------------------------------------
 
 
+def model_path_for(study: Study | None) -> Path:
+    """Return where the fitted model is saved for a study.
+
+    Args:
+        study: The study, or None for the April baseline.
+
+    Returns:
+        ``outputs/bertopic_model/model.pkl`` for the April baseline, otherwise
+        ``outputs/<study name>/bertopic_model/model.pkl``.
+    """
+    if study is None or study.name == "april_2026_baseline":
+        return OUTPUTS_DIR / "bertopic_model" / "model.pkl"
+    return OUTPUTS_DIR / study.name / "bertopic_model" / "model.pkl"
+
+
 def run(
     mode: str = "seed",
     rebuild: bool = False,
     nr_topics: int | None = None,
     min_topic_size: int | None = None,
+    study: Study | None = None,
 ) -> None:
     """End-to-end topic modeling on the chosen DB.
 
@@ -320,11 +370,12 @@ def run(
             merging.
         min_topic_size: Override BERTOPIC_MIN_TOPIC_SIZE. None uses the
             default (10 for seed, 50 for full).
+        study: Study whose databases to use. None means the April baseline.
 
     Raises:
         FileNotFoundError: If the target database does not exist.
     """
-    db_path = get_db_path(mode)
+    db_path = get_db_path(mode) if study is None else get_db_path(mode, study)
     if not db_path.exists():
         raise FileNotFoundError(
             f"{db_path} does not exist. Run db_setup.py --full first."
@@ -373,7 +424,10 @@ def run(
         if effective_min_topic_size is None:
             effective_min_topic_size = 10 if mode == "seed" else 50
 
-        modeler = TopicModeler(min_topic_size=effective_min_topic_size)
+        modeler = TopicModeler(
+            min_topic_size=effective_min_topic_size,
+            umap_preset=study.topic_umap_preset if study is not None else "legacy",
+        )
         topic_ids = modeler.fit(texts)
 
         # Count topics and outliers
@@ -425,15 +479,14 @@ def run(
         logger.info("Wrote %d rows to topics table.", n_topics)
 
         # Save model
-        model_path = OUTPUTS_DIR / "bertopic_model" / "model.pkl"
-        modeler.save_model(model_path)
+        modeler.save_model(model_path_for(study))
 
     finally:
         conn.close()
 
 
 def main() -> None:
-    """CLI entry point. Parses --full, --rebuild, --nr-topics, --min-topic-size."""
+    """CLI entry point. Parses --full, --rebuild, --nr-topics, --min-topic-size, --study."""
     parser = argparse.ArgumentParser(
         description="Fit BERTopic on Steam reviews and write topic assignments."
     )
@@ -459,12 +512,22 @@ def main() -> None:
         default=None,
         help="Override minimum cluster size (default: 10 for seed, 50 for full).",
     )
+    parser.add_argument(
+        "--study",
+        type=Path,
+        default=DEFAULT_STUDY_PATH,
+        help="Study TOML file (default: the April 2026 baseline).",
+    )
     args = parser.parse_args()
+    study = load_study(args.study)
     run(
         mode="full" if args.full else "seed",
         rebuild=args.rebuild,
-        nr_topics=args.nr_topics,
-        min_topic_size=args.min_topic_size,
+        nr_topics=args.nr_topics if args.nr_topics is not None else study.topic_nr_topics,
+        min_topic_size=(
+            args.min_topic_size if args.min_topic_size is not None else study.topic_min_size
+        ),
+        study=None if study.name == "april_2026_baseline" else study,
     )
 
 

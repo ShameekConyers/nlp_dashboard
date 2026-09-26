@@ -1,0 +1,94 @@
+# April 2026 cross-genre baseline. Mirrors src/utils.GAME_CATALOG and the
+# original pipeline paths so every default command reproduces the April study.
+
+[study]
+name = "april_2026_baseline"
+title = "April 2026 cross-genre baseline"
+seed_db = "data/seed.db"
+full_db = "data/full.db"
+raw_dir = "data/raw"
+language_filter = false
+
+[sampling]
+method = "stratified_legacy"  # 50/50 recommended per game, built by db_setup.build_seed_db
+filter = "recent"
+language = "english"
+review_type = "all"
+purchase_type = "all"
+filter_offtopic_activity = 1
+num_per_page = 100
+raw_cap_per_game = 5000
+seed_cap_per_game = 200
+random_seed = 0  # unused: the April seed used ORDER BY RANDOM()
+
+[[apps]]
+app_id = 292030
+name = "The Witcher 3"
+genre = "RPG"
+cohort = "RPG"
+
+[[apps]]
+app_id = 1245620
+name = "Elden Ring"
+genre = "RPG"
+cohort = "RPG"
+
+[[apps]]
+app_id = 1086940
+name = "Baldurs Gate 3"
+genre = "RPG"
+cohort = "RPG"
+
+[[apps]]
+app_id = 730
+name = "Counter-Strike 2"
+genre = "FPS"
+cohort = "FPS"
+
+[[apps]]
+app_id = 440
+name = "Team Fortress 2"
+genre = "FPS"
+cohort = "FPS"
+
+[[apps]]
+app_id = 782330
+name = "DOOM Eternal"
+genre = "FPS"
+cohort = "FPS"
+
+[[apps]]
+app_id = 289070
+name = "Civilization VI"
+genre = "Strategy"
+cohort = "Strategy"
+
+[[apps]]
+app_id = 281990
+name = "Stellaris"
+genre = "Strategy"
+cohort = "Strategy"
+
+[[apps]]
+app_id = 1142710
+name = "Total War WARHAMMER III"
+genre = "Strategy"
+cohort = "Strategy"
+
+[[apps]]
+app_id = 413150
+name = "Stardew Valley"
+genre = "Indie"
+cohort = "Indie"
+
+[[apps]]
+app_id = 1145360
+name = "Hades"
+genre = "Indie"
+cohort = "Indie"
+
+[[apps]]
+app_id = 367520
+name = "Hollow Knight"
+genre = "Indie"
+cohort = "Indie"

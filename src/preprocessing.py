@@ -32,8 +32,11 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from src.db_setup import create_tables
+from src.db_setup import create_study_tables, create_tables
+from src.study import DEFAULT_STUDY_PATH, Study, load_study
 from src.utils import (
+    DETECTOR_LANGUAGES,
+    LANGUAGE_MIN_CONFIDENCE,
     MIN_CLEAN_TEXT_CHARS,
     MIN_TOKEN_COUNT,
     PROJECT_STOPWORDS,
@@ -255,6 +258,124 @@ class Preprocessor:
         return results
 
 
+class LanguageFilter:
+    """Detect review language with lingua, restricted to Steam's languages.
+
+    Steam's ``language`` field is declared by the reviewer, so English pulls
+    still contain other languages. Lingua is deterministic and handles short
+    text; it is imported lazily so the dashboard never loads it.
+
+    Attributes:
+        detector: Lingua language detector.
+        min_confidence: Confidence at which a non-English detection drops a review.
+    """
+
+    min_confidence: float
+
+    def __init__(self, min_confidence: float = LANGUAGE_MIN_CONFIDENCE) -> None:
+        """Build the detector over ``utils.DETECTOR_LANGUAGES``.
+
+        Args:
+            min_confidence: Confidence at which a non-English detection drops
+                a review.
+        """
+        from lingua import Language, LanguageDetectorBuilder
+
+        languages = [getattr(Language, name) for name in DETECTOR_LANGUAGES]
+        self.detector = LanguageDetectorBuilder.from_languages(*languages).build()
+        self.min_confidence = min_confidence
+
+    def detect(self, text: str) -> tuple[str, float]:
+        """Return the most likely language and its confidence.
+
+        Args:
+            text: Cleaned review text.
+
+        Returns:
+            ``(language_code, confidence)`` where the code is a lowercase
+            lingua name such as ``english``. Empty text returns
+            ``("unknown", 0.0)``.
+        """
+        values = self.detector.compute_language_confidence_values(text) if text else []
+        if not values:
+            return "unknown", 0.0
+        top = values[0]
+        return top.language.name.lower(), float(top.value)
+
+    def is_english(self, lang: str, confidence: float) -> bool:
+        """Return whether a review counts as English.
+
+        A review is non-English only when its top language is not English
+        and that detection reaches ``min_confidence``. Requiring English
+        itself to reach the threshold dropped short English reviews: lingua
+        spreads confidence across 26 languages on text like "Good strategy
+        game. I love it." (see the Phase 7.1 language-filter note).
+
+        Args:
+            lang: Detected (top) language code.
+            confidence: Confidence of that detection.
+
+        Returns:
+            False only for a confident non-English detection.
+        """
+        return lang == "english" or confidence < self.min_confidence
+
+
+def apply_language_filter(
+    results: list[dict],
+    language_filter: LanguageFilter,
+) -> list[tuple[str, float] | None]:
+    """Turn kept non-English results into ``non_english`` sentinels in place.
+
+    Only reviews that passed the length and token checks are examined, so the
+    existing drop reasons keep their counts. A non-English review keeps its
+    ``cleaned_text`` but gets empty tokens and ``token_count`` 0, which every
+    query already excludes.
+
+    Args:
+        results: Output of ``Preprocessor.process_batch`` (mutated).
+        language_filter: The detector.
+
+    Returns:
+        Per-result detection ``(lang, confidence)``, or None where the review
+        was already dropped.
+    """
+    detections: list[tuple[str, float] | None] = []
+    for result in results:
+        if result["dropped"]:
+            detections.append(None)
+            continue
+        lang, confidence = language_filter.detect(result["cleaned_text"])
+        detections.append((lang, confidence))
+        if not language_filter.is_english(lang, confidence):
+            result.update(
+                {"tokens": [], "token_count": 0, "dropped": True, "drop_reason": "non_english"}
+            )
+    return detections
+
+
+def write_language_rows(
+    conn: sqlite3.Connection,
+    rows: list[tuple[int, str, float]],
+) -> None:
+    """Upsert detected language and confidence into review_language.
+
+    Args:
+        conn: Active SQLite connection with study tables created.
+        rows: ``(document_id, detected_lang, confidence)`` tuples.
+    """
+    conn.executemany(
+        """
+        INSERT INTO review_language (document_id, detected_lang, confidence)
+        VALUES (?, ?, ?)
+        ON CONFLICT(document_id) DO UPDATE SET
+            detected_lang = excluded.detected_lang,
+            confidence = excluded.confidence
+        """,
+        rows,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Database helpers
 # ---------------------------------------------------------------------------
@@ -335,6 +456,7 @@ def run(
     mode: str = "seed",
     rebuild: bool = False,
     batch_size: int = 200,
+    study: Study | None = None,
 ) -> None:
     """Run the full preprocessing pipeline against the chosen database.
 
@@ -354,12 +476,17 @@ def run(
             Combines freely with `mode`; `mode='full', rebuild=True` is a
             valid combo that wipes and reprocesses `full.db`.
         batch_size: Batch size for spaCy `nlp.pipe` and the fetch/write loop.
+        study: Study whose databases to use. None means the April baseline.
+            When the study sets ``language_filter``, non-English reviews
+            become ``non_english`` sentinels and detections are written to
+            ``review_language``.
 
     Raises:
         ValueError: If `mode` is not 'seed' or 'full'.
         FileNotFoundError: If the target database does not exist.
     """
-    db_path = get_db_path(mode)
+    db_path = get_db_path(mode) if study is None else get_db_path(mode, study)
+    use_language_filter = study is not None and study.language_filter
     if not db_path.exists():
         raise FileNotFoundError(
             f"{db_path} does not exist. Run db_setup.py --full first."
@@ -369,7 +496,10 @@ def run(
 
     conn = sqlite3.connect(db_path)
     try:
-        create_tables(conn)
+        if use_language_filter:
+            create_study_tables(conn)
+        else:
+            create_tables(conn)
 
         if rebuild:
             deleted = conn.execute("DELETE FROM processed_documents").rowcount
@@ -385,10 +515,12 @@ def run(
             return
 
         pre = Preprocessor()
+        lang_filter = LanguageFilter() if use_language_filter else None
 
         kept = 0
         dropped_short_text = 0
         dropped_few_tokens = 0
+        dropped_non_english = 0
         processed_so_far = 0
 
         for start in range(0, total, batch_size):
@@ -397,6 +529,14 @@ def run(
             ids = [row[0] for row in batch]
 
             results = pre.process_batch(raws)
+            language_rows: list[tuple[int, str, float]] = []
+            if lang_filter is not None:
+                detections = apply_language_filter(results, lang_filter)
+                language_rows = [
+                    (doc_id, det[0], det[1])
+                    for doc_id, det in zip(ids, detections)
+                    if det is not None
+                ]
 
             rows_to_write: list[tuple[int, str, str, int, int]] = []
             batch_kept = 0
@@ -404,6 +544,8 @@ def run(
                 if result["dropped"]:
                     if result["drop_reason"] == "too_short":
                         dropped_short_text += 1
+                    elif result["drop_reason"] == "non_english":
+                        dropped_non_english += 1
                     else:
                         dropped_few_tokens += 1
                 else:
@@ -418,6 +560,8 @@ def run(
 
             conn.execute("BEGIN")
             write_processed_rows(conn, rows_to_write)
+            if language_rows:
+                write_language_rows(conn, language_rows)
             conn.commit()
             kept += batch_kept
 
@@ -431,11 +575,12 @@ def run(
             )
 
         logger.info(
-            "Processed: kept %d, dropped %d (%d too short, %d too few tokens)",
+            "Processed: kept %d, dropped %d (%d too short, %d too few tokens, %d non-English)",
             kept,
-            dropped_short_text + dropped_few_tokens,
+            dropped_short_text + dropped_few_tokens + dropped_non_english,
             dropped_short_text,
             dropped_few_tokens,
+            dropped_non_english,
         )
         total_kept = conn.execute(
             "SELECT COUNT(*) FROM processed_documents WHERE token_count >= ?",
@@ -450,7 +595,7 @@ def run(
 
 
 def main() -> None:
-    """CLI entry point. Parses `--full` and `--rebuild` and calls `run`.
+    """CLI entry point. Parses `--full`, `--rebuild` and `--study` and calls `run`.
 
     All four combinations of the two flags are valid: there is no
     mutual-exclusion check.
@@ -474,11 +619,19 @@ def main() -> None:
         default=200,
         help="spaCy pipe batch size (default: 200).",
     )
+    parser.add_argument(
+        "--study",
+        type=Path,
+        default=DEFAULT_STUDY_PATH,
+        help="Study TOML file (default: the April 2026 baseline).",
+    )
     args = parser.parse_args()
+    study = load_study(args.study)
     run(
         mode="full" if args.full else "seed",
         rebuild=args.rebuild,
         batch_size=args.batch_size,
+        study=None if study.name == "april_2026_baseline" else study,
     )
 
 

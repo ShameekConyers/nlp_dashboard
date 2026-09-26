@@ -371,3 +371,31 @@ def test_run_rebuild_flag_wipes_existing_rows(
     count_rebuild = conn.execute("SELECT COUNT(*) FROM processed_documents").fetchone()[0]
     conn.close()
     assert count_rebuild == 2, "Rebuild should produce the same row count"
+
+
+# ---------------------------------------------------------------------------
+# Language filter
+# ---------------------------------------------------------------------------
+
+
+def test_language_filter_marks_non_english_as_sentinels(preprocessor: Preprocessor) -> None:
+    """German and Russian reviews become non_english sentinels; English stays kept."""
+    from src.preprocessing import LanguageFilter, apply_language_filter
+
+    raws = [
+        "Good strategy game. I love it.",
+        "Das Spiel ist sehr gut, aber die Karten sind zu klein und die KI ist dumm.",
+        "Отличная тактическая игра, но искусственный интеллект слишком слабый.",
+    ]
+    results = preprocessor.process_batch(raws)
+    detections = apply_language_filter(results, LanguageFilter())
+
+    assert results[0]["dropped"] is False
+    assert detections[0][0] == "english"
+    for i in (1, 2):
+        assert results[i]["drop_reason"] == "non_english"
+        assert results[i]["token_count"] == 0
+        assert results[i]["tokens"] == []
+        assert results[i]["cleaned_text"] == raws[i]
+    assert detections[1][0] == "german"
+    assert detections[2][0] == "russian"

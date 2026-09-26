@@ -1,0 +1,212 @@
+# Phrase lexicon for design themes in strategy-game reviews.
+#
+# Each aspect lists case-insensitive regular expressions. A sentence is tagged
+# with an aspect when any include pattern matches and no exclude pattern does.
+# Design aspects answer turn-based design questions; control aspects size them
+# against the usual review drivers. Iterated on the dev split only (two passes,
+# 2026-09-26), then frozen as strategy_v1. Changes after this point need a new
+# version and a fresh test-split audit.
+
+[lexicon]
+version = "strategy_v1"
+
+[[aspects]]
+name = "turn_waiting"
+kind = "design"
+label = "Waiting through enemy turns"
+include = [
+    '\b(ai|enemy|enemies|computer|opponents?|alien|cpu)([\x27\u2019]s)?\s+(turns?|phases?|moves?)\b.{0,50}\b(long|longer|slow|slower|forever|ages|minutes|wait\w*|drag\w*|takes? (so )?(long|forever|ages))\b',
+    '\b(long|longer|slow|lengthy|endless)\s+(ai|enemy|end|cpu|computer)[- ]?(turns?|phases?)\b',
+    '\bwait\w*\b.{0,30}\b(for|through|on)\s+(the\s+)?(ai|enemy|enemies|computer|opponents?|cpu)\w*\b.{0,30}\b(turns?|moves?|movement|finish\w*|phases?)\b',
+    '\bwait\w*\b.{0,20}\b(turns?|phases?)\s+to\s+(end|finish|resolve|pass)\b',
+    '\bturn\s+(processing|times?|resolution)\b.{0,40}\b(long|slow|forever|minutes|ages)\b',
+    '\b(skip|speed up|fast[- ]?forward)\w*\b.{0,30}\b(ai|enemy|enemies|opponent)\w*\s*(turns?|moves?|movement|animations?|phases?)\b',
+    '\b(unskippable|can[\x27\u2019]?t skip|cannot skip|no way to skip)\b.{0,30}\b(animations?|turns?|moves?|movement)\b',
+]
+exclude = [
+    '\bwait\w*\s+(for|until)\s+(a|the|an|another)?\s*(sale|discount|dlc|patch|update|sequel|release|fix|expansion|next)\b',
+]
+
+[[aspects]]
+name = "first_strike"
+kind = "design"
+label = "First-strike advantage"
+include = [
+    '\balpha[- ]?strik\w*\b',
+    '\bfirst[- ]move(r)?\s+advantage\b',
+    '\bfirst[- ]strike\b',
+    '\bwho(ever)?\s+(moves|goes|acts|shoots|attacks|strikes)\s+first\b',
+    '\b(strikes?|shoots?|attacks?)\s+first\s+(wins?|advantage)\b',
+]
+exclude = []
+
+[[aspects]]
+name = "initiative_clarity"
+kind = "design"
+label = "Initiative and turn order"
+include = [
+    '\binitiative\b',
+    '\bturn[- ]order\b',
+    '\b(activation|action)\s+order\b',
+    '\brandom\s+activation\b',
+    '\bspeed\s+stat\b',
+]
+exclude = [
+    '\b(take|takes|taking|took|seize|seizing)\s+(the\s+)?initiative\b',
+    '\bown\s+initiative\b',
+    '\bthe\s+initiative\s+(dlc|expansion|faction)\b',
+]
+
+[[aspects]]
+name = "preview_reliability"
+kind = "design"
+label = "Combat preview and hit chance"
+include = [
+    '\b(combat|damage|attack|battle|fight)\s+(previews?|forecasts?|predictions?|predictor|calculator)\b',
+    '\bpredicted\s+(damage|outcome|result|losses)\b',
+    '\bhit\s+(chances?|percentages?|probabilit\w*|%)\b',
+    '\b\d{2,3}\s?%\s*(chance\s+to\s+hit|to[- ]hit|hit\s+chance|hit|shots?|chance\s+shots?)\b',
+    '\bmiss\w*\b.{0,30}\b\d{2,3}\s?%',
+    '\b\d{2,3}\s?%.{0,30}\bmiss\w*\b',
+]
+exclude = [
+    '\bpreview\s+(build|event|version|weekend|access)\b',
+    '\bearly\s+access\s+preview\b',
+]
+
+[[aspects]]
+name = "ai_quality"
+kind = "design"
+label = "Enemy AI quality"
+include = [
+    '\b(enemy|computer|opponent|cpu)\s+ai\b',
+    '\bai\s+(opponents?|difficulty|behaviou?r|logic|cheats?|cheating|bonus\w*|is|was|seems|feels|can|does|doesn[\x27\u2019]?t|never|always|will|gets)\b',
+    '\b(stupid|dumb|smart|smarter|clever|cheating|passive|aggressive|competent|incompetent|terrible|awful|poor|decent|weak|predictable|brain[- ]?dead|braindead|challenging|good|great|bad|better|improved|horrible|suicidal)\s+(enemy\s+)?ai\b',
+    '\bartificial\s+intelligence\b',
+]
+exclude = [
+    '\bai[- ](art|generated|generation|voices?|voice[- ]?acting|voiced|slop|assets?|images?|artwork|music|translation|translated|written|made|upscal\w*|portraits?)\b',
+    '\bgenerative\s+ai\b',
+    '\b(uses?|using|used)\s+ai\s+(for|to)\b',
+    '\b(chatgpt|llm|midjourney)\b',
+]
+
+[[aspects]]
+name = "map_design"
+kind = "design"
+label = "Maps, terrain and scenarios"
+include = [
+    '\bmaps?\b',
+    '\bterrain\b',
+    '\bscenarios?\b',
+    '\bchoke[- ]?points?\b',
+    '\blevel\s+design\b',
+    '\bmap\s+editor\b',
+]
+exclude = [
+    '\broad[- ]?maps?\b',
+    '\bmind[- ]?maps?\b',
+    '\bworst[- ]case\s+scenario\b',
+    '\bbest[- ]case\s+scenario\b',
+]
+
+[[aspects]]
+name = "pacing"
+kind = "design"
+label = "Pacing, grind and late game"
+include = [
+    '\btedious\b',
+    '\bgrind(y|ing|s)?\b',
+    '\brepetitive\b',
+    '\blate[- ]game\b',
+    '\bsnowball\w*\b',
+    '\bmicro[- ]?manag\w*\b',
+    '\bpacing\b',
+    '\bslow[- ]paced\b',
+    '\b(drags?|dragged|dragging)\s+on\b',
+    '\b(turn|round|mission)\s+(limits?|timers?)\b',
+]
+exclude = []
+
+[[aspects]]
+name = "bugs_performance"
+kind = "control"
+label = "Bugs and performance"
+include = [
+    '\bbugs?\b',
+    '\bbuggy\b',
+    '\bcrash\w*\b',
+    '\bglitch\w*\b',
+    '\bperformance\b',
+    '\bfps\b',
+    '\bframe[- ]?rates?\b',
+    '\bstutter\w*\b',
+    '\blag(gy|s|ging)?\b',
+    '\bfreez\w*\b',
+    '\bloading\s+(times?|screens?)\b',
+    '\bunoptimi[sz]ed\b',
+    '\boptimi[sz]ation\b',
+    '\bsoft[- ]?lock\w*\b',
+]
+exclude = [
+    '\b(kill|killing|squish\w*|squash\w*|shoot\w*|fight\w*|stomp\w*|punch\w*)\s+(the\s+|giant\s+|alien\s+|space\s+)?bugs?\b',
+    '\b(giant|alien|space|evil)\s+bugs?\b',
+    '\bbugs?\s+(threaten\w*|attack\w*|spawn\w*|emerg\w*|burrow\w*)\b',
+    '\bmechs?\s+(vs\.?|versus|against)\s+bugs\b',
+]
+
+[[aspects]]
+name = "ui_clarity"
+kind = "control"
+label = "UI and interface"
+include = [
+    '\bui\b',
+    '\buser\s+interface\b',
+    '\binterface\b',
+    '\bmenus?\b',
+    '\btool[- ]?tips?\b',
+    '\bhud\b',
+]
+exclude = []
+
+[[aspects]]
+name = "translation"
+kind = "control"
+label = "Translation and text"
+include = [
+    '\btranslations?\b',
+    '\b(machine|poorly|badly|bad|terrible|awful|google)[- ]translat\w*\b',
+    '\blocali[sz]ation\b',
+    '\blocali[sz]ed\s+(version|text|into)\b',
+    '\bengrish\b',
+    '\btypos?\b',
+    '\bgrammar\b',
+    '\bsubtitles?\b',
+    '\benglish\s+(text|version|language|dub|voice)\w*\b',
+]
+exclude = []
+
+[[aspects]]
+name = "price_dlc"
+kind = "control"
+label = "Price and DLC"
+include = [
+    '\bprices?\b',
+    '\bpriced\b',
+    '\bpricing\b',
+    '\bdlcs?\b',
+    '\bexpensive\b',
+    '\bon\s+sale\b',
+    '\bfull\s+price\b',
+    '\bdiscount\w*\b',
+    '\bmicro[- ]?transactions?\b',
+    '\bcash[- ]?grab\b',
+    '\bseason\s+pass\b',
+    '\bpaywall\w*\b',
+    '\bworth\s+(the\s+)?(money|price|cost)\b',
+]
+exclude = [
+    '\bat\s+the\s+(price|cost)\s+of\b',
+    '\b(small|steep|high)\s+price\s+to\s+pay\b',
+    '\bprice\s+to\s+pay\b',
+]
