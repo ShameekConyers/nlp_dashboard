@@ -47,6 +47,7 @@ from dashboard.queries import (  # noqa: E402
     get_sentiment_by_topic,
     get_sentiment_distribution,
     get_sentiment_over_time,
+    get_sentiment_validation,
     get_sentiment_vs_recommendation,
     get_sentiment_with_genre,
     get_theme_stats,
@@ -74,6 +75,13 @@ VADER_CAVEAT: str = (
     "VADER is a lexicon scorer. On strategy reviews it often scores critical, "
     "not-recommended reviews as positive (see Methods for the measured false-positive "
     "rate), so treat VADER columns as tone, not verdict. The recommend flag is the verdict."
+)
+
+MODEL_NOTE: str = (
+    "RoBERTa columns give the share of reviews that the adopted transformer "
+    "(siebert/sentiment-roberta-large-english) scores positive. It beat VADER on held-out "
+    "reviews (see Sentiment Analysis), so it is the primary sentiment measure; VADER stays "
+    "for continuity."
 )
 
 SUBGROUP_LABELS: dict[str, str] = {
@@ -146,6 +154,17 @@ run_id: int | None = _run[0] if _run else None
 run_metrics: dict = _run[1] if _run else {}
 _ref = get_latest_run(conn, "reference_checks") if is_market else None
 ref_metrics: dict = _ref[1] if _ref else {}
+has_model: bool = bool(run_metrics.get("sentiment_model"))
+_audit = get_latest_run(conn, "sentence_audit") if is_market else None
+sentence_audit: dict = _audit[1] if _audit else {}
+# Transformer validation lives in the study's scores database: the market seed
+# itself, or a sidecar beside the April seed so that file never changes.
+_scores_path = study.scores_path
+sentiment_validation: dict | None = (
+    get_sentiment_validation(_get_connection(str(_scores_path)))
+    if _mode == "seed" and _scores_path.exists()
+    else None
+)
 
 
 # ---------------------------------------------------------------------------
@@ -359,7 +378,11 @@ def _render_market_overview() -> None:
     c1.metric("Games", f"{len(games)}")
     c2.metric("Eligible for cohort estimates", f"{int(games['eligible'].sum())}")
     c3.metric("Kept English reviews", f"{int(games['n_kept'].sum()):,}")
-    c4.metric("VADER balanced accuracy (test)", _pct(val.get("balanced_accuracy")))
+    if has_model and sentiment_validation:
+        rob = sentiment_validation["market_test"]["scorers"][sentiment_validation["selected"]]
+        c4.metric("RoBERTa balanced accuracy (test)", _pct(rob["balanced_accuracy"]["value"]))
+    else:
+        c4.metric("VADER balanced accuracy (test)", _pct(val.get("balanced_accuracy")))
 
     st.subheader("Natural recommend share per game")
     st.caption(
@@ -431,33 +454,43 @@ def _render_market_overview() -> None:
     st.plotly_chart(fig, width="stretch")
 
     st.subheader("Cohort sentiment and playtime")
-    st.caption(VADER_CAVEAT)
+    st.caption((MODEL_NOTE + " " if has_model else "") + VADER_CAVEAT)
+    model_cols = (["macro_model_pos_share", "macro_model_pos_ci_low", "macro_model_pos_ci_high"]
+                  if has_model else [])
     st.dataframe(
-        cohorts[["scope", "n_kept", "macro_mean_compound", "macro_compound_ci_low",
+        cohorts[["scope", "n_kept", *model_cols, "macro_mean_compound", "macro_compound_ci_low",
                  "macro_compound_ci_high", "median_hours_rec", "median_hours_not_rec"]].rename(
             columns={"scope": "Scope", "n_kept": "Kept reviews",
+                     "macro_model_pos_share": "RoBERTa positive (macro)",
+                     "macro_model_pos_ci_low": "RoBERTa low",
+                     "macro_model_pos_ci_high": "RoBERTa high",
                      "macro_mean_compound": "Mean VADER (macro)",
                      "macro_compound_ci_low": "VADER low", "macro_compound_ci_high": "VADER high",
                      "median_hours_rec": "Median hours, recommended",
                      "median_hours_not_rec": "Median hours, not recommended"}),
         width="stretch", hide_index=True,
         column_config={c: st.column_config.NumberColumn(format="%.3f") for c in
-                       ["Mean VADER (macro)", "VADER low", "VADER high"]}
+                       ["Mean VADER (macro)", "VADER low", "VADER high",
+                        "RoBERTa positive (macro)", "RoBERTa low", "RoBERTa high"]}
         | {c: st.column_config.NumberColumn(format="%.1f") for c in
            ["Median hours, recommended", "Median hours, not recommended"]},
     )
 
     st.subheader("Per-game sentiment")
     st.dataframe(
-        games[["app_name", "cohort", "subgroup", "n_kept", "rec_share", "mean_compound",
-               "vader_pos_share", "eligible"]].rename(
+        games[["app_name", "cohort", "subgroup", "n_kept", "rec_share",
+               *(["model_pos_share", "model_pos_ci_low", "model_pos_ci_high"] if has_model else []),
+               "mean_compound", "vader_pos_share", "eligible"]].rename(
             columns={"app_name": "Game", "cohort": "Cohort", "subgroup": "Subgroup",
                      "n_kept": "Kept reviews", "rec_share": "Recommended (kept)",
+                     "model_pos_share": "RoBERTa positive", "model_pos_ci_low": "RoBERTa low",
+                     "model_pos_ci_high": "RoBERTa high",
                      "mean_compound": "Mean VADER", "vader_pos_share": "VADER positive share",
                      "eligible": "Eligible"}),
         width="stretch", hide_index=True,
         column_config={c: st.column_config.NumberColumn(format="%.3f") for c in
-                       ["Recommended (kept)", "Mean VADER", "VADER positive share"]},
+                       ["Recommended (kept)", "Mean VADER", "VADER positive share",
+                        "RoBERTa positive", "RoBERTa low", "RoBERTa high"]},
     )
 
 
@@ -572,7 +605,8 @@ def _render_topics_sentiment() -> None:
     st.plotly_chart(fig, width="stretch")
 
     table = sub[["Topic", "k_docs", "share", "complaint_share", "praise_share", "lift",
-                 "lift_ci_low", "lift_ci_high", "rec_share_in_theme", "mean_compound",
+                 "lift_ci_low", "lift_ci_high", "rec_share_in_theme",
+                 *(["model_pos_share"] if has_model else []), "mean_compound",
                  "logo_stable", "finding"]].copy()
     table["finding"] = table["finding"].map(_finding_badge)
     st.dataframe(
@@ -580,12 +614,14 @@ def _render_topics_sentiment() -> None:
                               "complaint_share": "Complaint share", "praise_share": "Praise share",
                               "lift": "Lift", "lift_ci_low": "Lift low", "lift_ci_high": "Lift high",
                               "rec_share_in_theme": "Recommended in topic",
+                              "model_pos_share": "RoBERTa positive",
                               "mean_compound": "Mean VADER", "logo_stable": "LOGO stable",
                               "finding": "Status"}),
         width="stretch", hide_index=True,
         column_config={c: st.column_config.NumberColumn(format="%.3f") for c in
                        ["Share", "Complaint share", "Praise share", "Lift", "Lift low",
-                        "Lift high", "Recommended in topic", "Mean VADER"]},
+                        "Lift high", "Recommended in topic", "RoBERTa positive",
+                        "Mean VADER"]},
     )
 
     _render_top_themes("topic")
@@ -681,12 +717,23 @@ def _render_design_themes() -> None:
     st.plotly_chart(fig, width="stretch")
 
     table = df[["Scope", "Aspect", "k_docs", "complaint_share", "praise_share", "lift",
-                "lift_ci_low", "lift_ci_high", "mean_compound", "logo_stable", "finding"]].copy()
+                "lift_ci_low", "lift_ci_high", *(["model_pos_share"] if has_model else []),
+                "mean_compound", "logo_stable", "finding"]].copy()
     table["finding"] = table["finding"].map(_finding_badge)
     st.dataframe(table, width="stretch", hide_index=True,
                  column_config={c: st.column_config.NumberColumn(format="%.3f") for c in
                                 ["complaint_share", "praise_share", "lift", "lift_ci_low",
-                                 "lift_ci_high", "mean_compound"]})
+                                 "lift_ci_high", "model_pos_share", "mean_compound"]})
+    if has_model:
+        st.caption("model_pos_share: share of the aspect's reviews (whole review) that "
+                   "RoBERTa scores positive. " + VADER_CAVEAT)
+    if sentence_audit and not sentence_audit.get("passes"):
+        st.info(
+            "Sentence-level sentiment for aspect sentences is stored but not shown: on a "
+            f"{sentence_audit['n']}-sentence audit its three-class macro-F1 is "
+            f"{sentence_audit['macro_f1_3class']:.2f}, below the "
+            f"{sentence_audit['gate']:.2f} gate set before labelling."
+        )
 
     _render_top_themes("aspect")
 
@@ -774,6 +821,36 @@ def _render_methods() -> None:
         )
         st.subheader("VADER on the natural sample (test split)")
         st.json(run_metrics.get("vader_validation", {}))
+        st.subheader("Sentiment model")
+        model = run_metrics.get("sentiment_model")
+        st.markdown(
+            (f"Adopted: `{model['model_name']}` at revision `{model['revision'][:12]}`, "
+             f"positive when its probability is at least {model['positive_cutoff']}. "
+             if model else "No transformer was adopted; VADER is the only sentiment measure. ")
+            + "Candidates were selected on the dev split and compared with VADER once on the "
+            "test split (Decision 11). Long reviews keep their first 256 and last 254 tokens. "
+            "Only document-level scores feed the sentiment columns."
+        )
+        if sentence_audit:
+            st.json({k: sentence_audit[k] for k in
+                     ("n", "label_counts", "neither_band", "macro_f1_3class", "binary_n",
+                      "binary_macro_f1", "gate", "passes")})
+        _cov = get_latest_run(conn, "coverage_proxy")
+        if _cov:
+            st.subheader("Lexicon coverage proxy")
+            st.caption("Share of not-recommended kept reviews with no aspect match, and the "
+                       "topics those reviews fall into. A recall gap, not a finding.")
+            st.dataframe(pd.DataFrame([
+                {"Scope": _scope_label(r["scope_type"], r["scope_id"]),
+                 "Not recommended": r["n_not_recommended"],
+                 "No aspect": r["unmatched_any_share"],
+                 "No passing aspect": r["unmatched_passing_share"],
+                 "Top unmatched topics": ", ".join(
+                     f"{t['label']} ({t['count']})" for t in r["top_unmatched_topics"][:3])}
+                for r in _cov[1]["scopes"]
+            ]), width="stretch", hide_index=True,
+                column_config={c: st.column_config.NumberColumn(format="%.3f")
+                               for c in ("No aspect", "No passing aspect")})
         st.subheader("Aspect precision audit")
         st.json({"status": run_metrics.get("aspect_audit_status"),
                  "precision": run_metrics.get("aspect_precision", {})})
@@ -874,9 +951,105 @@ def _render_overview() -> None:
 # ---------------------------------------------------------------------------
 
 
+_SCORER_NAMES: dict[str, str] = {
+    "vader_0.05": "VADER (threshold 0.05)",
+    "vader_dev_tuned": "VADER (dev-tuned threshold {t:+.2f})",
+    "roberta_large": "RoBERTa-large (siebert)",
+    "distilbert_sst2": "DistilBERT SST-2",
+}
+
+
+def _ci_cell(entry: dict, ci_key: str = "ci") -> str:
+    """Format a metric and its interval as ``70.3% (68.7 to 72.0)``.
+
+    Args:
+        entry: ``{"value": float, "ci": [low, high]}``.
+        ci_key: Which interval to show.
+
+    Returns:
+        The formatted cell.
+    """
+    lo, hi = entry.get(ci_key) or (None, None)
+    if entry.get("value") is None:
+        return "n/a"
+    if lo is None or hi is None:
+        return _pct(entry["value"])
+    return f"{_pct(entry['value'])} ({_bound_pct(lo)} to {_bound_pct(hi)})"
+
+
+def _bound_pct(x: float) -> str:
+    """Format an interval bound as a bare percentage number.
+
+    Args:
+        x: A share.
+
+    Returns:
+        The share times 100 with one decimal.
+    """
+    return f"{100 * x:.1f}"
+
+
+def _comparison_table(block: dict, tuned: float) -> pd.DataFrame:
+    """Build the model comparison table for one validation block.
+
+    Args:
+        block: ``market_test``, ``april_all`` or ``april_strategy`` metrics.
+        tuned: The dev-tuned VADER threshold.
+
+    Returns:
+        One row per scorer.
+    """
+    rows = []
+    for key, m in block["scorers"].items():
+        rows.append({
+            "Scorer": _SCORER_NAMES.get(key, key).format(t=tuned),
+            "Balanced accuracy": _ci_cell(m["balanced_accuracy"]),
+            "Accuracy": _ci_cell(m["accuracy"]),
+            "Macro-F1": _ci_cell(m["macro_f1"]),
+            "ROC AUC": _ci_cell(m["auc"]),
+            "Not-recommended scored positive": _ci_cell(m["false_positive_rate"], "wilson_ci"),
+        })
+    return pd.DataFrame(rows)
+
+
+def _render_model_comparison() -> None:
+    """Show the held-out comparison of VADER and the transformer candidates."""
+    if not sentiment_validation:
+        return
+    v = sentiment_validation
+    tuned = v["dev"]["vader_tuned_threshold"]
+    st.subheader("Model comparison (held-out)")
+    st.caption(
+        "Ground truth is the Steam recommend flag. Balanced accuracy is the pre-registered "
+        "metric; plain accuracy rewards calling everything positive on mostly positive data. "
+        "Intervals are 95% review-level bootstrap (Wilson for the not-recommended-scored-"
+        "positive rate). These are fixed results; the sidebar filters do not apply."
+    )
+    blocks = (
+        [("market_test", f"Market seed, test split (n = {v['market_test']['n']:,})")]
+        if is_market
+        else [("april_all", f"April seed, all kept reviews (n = {v['april_all']['n']:,})"),
+              ("april_strategy",
+               f"April seed, strategy titles (n = {v['april_strategy']['n']:,})")]
+    )
+    for key, title in blocks:
+        st.markdown(f"**{title}**")
+        st.dataframe(_comparison_table(v[key], tuned), hide_index=True, width="stretch")
+    selected = v["selected"]
+    diff = v["market_test"]["differences"][f"{selected}_minus_vader_dev_tuned"]
+    lo, hi = diff["ci"]
+    verdict = "adopted" if v["adopted"] else "not adopted; VADER stays primary"
+    st.markdown(
+        f"Selected on the dev split: **{_SCORER_NAMES[selected]}**. Market test gain in "
+        f"balanced accuracy over dev-tuned VADER: {100 * diff['value']:+.1f} points "
+        f"({100 * lo:+.1f} to {100 * hi:+.1f}). Verdict: **{verdict}**."
+    )
+
+
 def _render_sentiment() -> None:
     """Render the Sentiment Analysis dashboard view."""
     st.header("Sentiment Analysis")
+    _render_model_comparison()
 
     kpis = get_overview_kpis(conn, **filters)
     if kpis["total_reviews"] == 0:

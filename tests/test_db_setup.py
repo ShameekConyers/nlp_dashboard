@@ -11,6 +11,7 @@ from src.study import Study
 from src.utils import DATA_DIR, SEED_DB_PATH
 
 MARKET_SEED_DB_PATH: Path = DATA_DIR / "market_seed.db"
+APRIL_SCORES_DB_PATH: Path = DATA_DIR / "seed_transformer_scores.db"
 
 
 def _make_in_memory_db() -> sqlite3.Connection:
@@ -118,9 +119,19 @@ def test_insert_documents_skips_empty_text() -> None:
 def test_committed_dbs_under_25mb() -> None:
     """Verify the committed databases together stay under 25 MB."""
     total_mb = sum(
-        p.stat().st_size for p in (SEED_DB_PATH, MARKET_SEED_DB_PATH) if p.exists()
+        p.stat().st_size
+        for p in (SEED_DB_PATH, MARKET_SEED_DB_PATH, APRIL_SCORES_DB_PATH)
+        if p.exists()
     ) / (1024 * 1024)
     assert total_mb < 25, f"committed DBs total {total_mb:.2f} MB, exceeds 25 MB limit"
+
+
+def test_market_seed_db_under_20mib() -> None:
+    """Verify the market seed alone stays under its 20 MiB cap (Decision 5, measured in MiB)."""
+    if not MARKET_SEED_DB_PATH.exists():
+        return
+    size_mib = MARKET_SEED_DB_PATH.stat().st_size / (1024 * 1024)
+    assert size_mib < 20, f"market seed is {size_mib:.2f} MiB, exceeds the 20 MiB cap"
 
 
 def test_seed_db_under_25mb() -> None:

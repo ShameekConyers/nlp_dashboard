@@ -45,7 +45,13 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from src.study import Study, load_study
-from src.utils import MIN_TOKEN_COUNT, PROJECT_ROOT, VADER_POSITIVE_THRESHOLD, get_logger
+from src.utils import (
+    MIN_TOKEN_COUNT,
+    PROJECT_ROOT,
+    TRANSFORMER_POSITIVE_CUTOFF,
+    VADER_POSITIVE_THRESHOLD,
+    get_logger,
+)
 
 logger = get_logger(__name__)
 
@@ -168,12 +174,15 @@ class GameData:
         rec: Recommend flag per kept review (bool).
         compound: VADER compound per kept review.
         themes: ``(n_reviews, n_themes)`` boolean membership matrix.
+        model_pos: 1.0 where the adopted transformer scores the review
+            positive, else 0.0; None when no transformer was adopted.
     """
 
     app_id: int
     rec: np.ndarray
     compound: np.ndarray
     themes: np.ndarray = field(default_factory=lambda: np.zeros((0, 0), dtype=bool))
+    model_pos: np.ndarray | None = None
 
 
 @dataclass
@@ -310,14 +319,15 @@ def cluster_bootstrap_macro(
 
     Returns:
         ``{metric: (low, high)}`` for ``share``, ``complaint``, ``praise``,
-        ``lift`` (arrays over themes), and ``rec_share`` and ``mean_compound``
-        (macro recommend share and macro mean VADER compound, scalars in arrays).
+        ``lift`` (arrays over themes), and ``rec_share``, ``mean_compound``
+        and ``model_pos`` (macro recommend share, macro mean VADER compound and
+        macro transformer-positive share, scalars in arrays).
     """
     rng = np.random.default_rng(seed)
     k = len(games)
     out: dict[str, list[np.ndarray]] = {
         "share": [], "complaint": [], "praise": [], "lift": [], "rec_share": [],
-        "mean_compound": [],
+        "mean_compound": [], "model_pos": [],
     }
     for _ in range(n_boot):
         picks = rng.integers(0, k, size=k)
@@ -326,7 +336,8 @@ def cluster_bootstrap_macro(
             g = games[gi]
             n = g.rec.size
             w = rng.multinomial(n, np.full(n, 1 / n)).astype(float)
-            per.append((*_weighted_game_metrics(g, w), float(w @ g.compound / w.sum())))
+            pos = float(w @ g.model_pos / w.sum()) if g.model_pos is not None else math.nan
+            per.append((*_weighted_game_metrics(g, w), float(w @ g.compound / w.sum()), pos))
         with np.errstate(invalid="ignore", divide="ignore"), warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
             share = np.nanmean([p[0] for p in per], axis=0)
@@ -334,6 +345,7 @@ def cluster_bootstrap_macro(
             praise = np.nanmean([p[2] for p in per], axis=0)
             rec_share = np.nanmean([p[3] for p in per])
             mean_compound = np.nanmean([p[4] for p in per])
+            model_pos = np.nanmean([p[5] for p in per])
             lift = complaint / praise
         out["share"].append(share)
         out["complaint"].append(complaint)
@@ -341,6 +353,7 @@ def cluster_bootstrap_macro(
         out["lift"].append(lift)
         out["rec_share"].append(np.array([rec_share]))
         out["mean_compound"].append(np.array([mean_compound]))
+        out["model_pos"].append(np.array([model_pos]))
     return {key: _percentiles(np.array(v)) for key, v in out.items()}
 
 
@@ -416,27 +429,31 @@ def _rank_desc(values: np.ndarray) -> np.ndarray:
     return ranks
 
 
-def theme_sentiment(games: Sequence[GameData], j: int) -> tuple[float, float, float]:
-    """Macro recommend share, mean VADER compound and VADER-positive share inside a theme.
+def theme_sentiment(games: Sequence[GameData], j: int) -> tuple[float, float, float, float]:
+    """Macro sentiment inside a theme: recommend share, VADER and transformer.
 
     Args:
         games: Games in the scope.
         j: Theme column.
 
     Returns:
-        ``(rec_share_in_theme, mean_compound, vader_pos_share)``; nan if no
-        game has a review in the theme.
+        ``(rec_share_in_theme, mean_compound, vader_pos_share, model_pos_share)``;
+        nan if no game has a review in the theme (``model_pos_share`` is also
+        nan when no transformer was adopted).
     """
-    recs, comps, poss = [], [], []
+    recs, comps, poss, models = [], [], [], []
     for g in games:
         sel = g.themes[:, j]
         if sel.any():
             recs.append(g.rec[sel].mean())
             comps.append(g.compound[sel].mean())
             poss.append((g.compound[sel] >= VADER_POSITIVE_THRESHOLD).mean())
+            if g.model_pos is not None:
+                models.append(g.model_pos[sel].mean())
     if not recs:
-        return math.nan, math.nan, math.nan
-    return float(np.mean(recs)), float(np.mean(comps)), float(np.mean(poss))
+        return math.nan, math.nan, math.nan, math.nan
+    model = float(np.mean(models)) if models else math.nan
+    return float(np.mean(recs)), float(np.mean(comps)), float(np.mean(poss)), model
 
 
 def classify_finding(
@@ -651,6 +668,50 @@ def vader_validation(rows: Sequence[ReviewRow]) -> dict[str, Any]:
     }
 
 
+def load_adopted_model(study: Study) -> tuple[dict[str, str], dict[int, float]] | None:
+    """Return the adopted transformer and its document scores, if one was adopted.
+
+    Reads the newest ``sentiment_validation`` run in the study's scores
+    database (Decision 11). When VADER was not beaten, returns None and the
+    sentiment views stay on VADER alone.
+
+    Args:
+        study: The study.
+
+    Returns:
+        ``({"model_name", "revision"}, {document_id: positive_prob})`` or None.
+    """
+    if not study.scores_path.exists():
+        return None
+    conn = sqlite3.connect(study.scores_path)
+    try:
+        has = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sentiment_scores'"
+        ).fetchone()
+        row = conn.execute(
+            "SELECT metrics FROM analysis_runs WHERE stage = 'sentiment_validation' "
+            "ORDER BY run_id DESC LIMIT 1"
+        ).fetchone() if has else None
+        if row is None:
+            return None
+        v = json.loads(row[0])
+        if not v.get("adopted"):
+            return None
+        model = v["models"][v["selected"]]
+        probs = dict(conn.execute(
+            """
+            SELECT s.document_id, s.positive_prob
+            FROM sentiment_scores s
+            JOIN sentiment_models m ON m.model_id = s.model_id
+            WHERE m.model_name = ? AND m.model_revision = ? AND s.unit = 'doc'
+            """,
+            (model["model_name"], model["revision"]),
+        ).fetchall())
+        return {"model_name": model["model_name"], "revision": model["revision"]}, probs
+    finally:
+        conn.close()
+
+
 def _scopes(study: Study, eligible: set[int], kept_ok: set[int]) -> list[tuple[str, str, list[int], list[int]]]:
     """Enumerate cohort-level scopes.
 
@@ -714,6 +775,16 @@ def run(study: Study, n_boot: int = N_BOOT) -> int:
         by_app: dict[int, list[ReviewRow]] = {}
         for r in rows:
             by_app.setdefault(r.app_id, []).append(r)
+        adopted = load_adopted_model(study)
+        model_prob = adopted[1] if adopted else {}
+
+        def model_pos(rs: Sequence[ReviewRow]) -> np.ndarray | None:
+            """Transformer-positive flags (as floats) for reviews, or None if none adopted."""
+            if not adopted:
+                return None
+            return np.array(
+                [model_prob[r.document_id] >= TRANSFORMER_POSITIVE_CUTOFF for r in rs], dtype=float
+            )
 
         games: dict[int, GameData] = {}
         for app_id, rs in by_app.items():
@@ -730,6 +801,7 @@ def run(study: Study, n_boot: int = N_BOOT) -> int:
                 np.array([r.recommended for r in rs]),
                 np.array([r.compound for r in rs]),
                 m,
+                model_pos(rs),
             )
 
         # ---- per-game base stats ------------------------------------------
@@ -786,6 +858,9 @@ def run(study: Study, n_boot: int = N_BOOT) -> int:
             drop = drops.get(app.app_id, (0, 0, 0, 0, None))
             hours_rec = [r.hours for r in rs if r.recommended and r.hours is not None]
             hours_not = [r.hours for r in rs if not r.recommended and r.hours is not None]
+            mp = model_pos(rs)
+            k_mp = int(mp.sum()) if mp is not None else 0
+            mp_lo, mp_hi = wilson_interval(k_mp, n_kept) if mp is not None else (math.nan, math.nan)
             game_rows.append((
                 app.app_id,
                 pull[1] if pull else None,
@@ -803,6 +878,8 @@ def run(study: Study, n_boot: int = N_BOOT) -> int:
                 _num(float(np.mean([r.compound for r in rs]))) if rs else None,
                 _num(float(np.mean([r.compound >= VADER_POSITIVE_THRESHOLD for r in rs])))
                 if rs else None,
+                _num(k_mp / n_kept) if mp is not None and n_kept else None,
+                _num(mp_lo), _num(mp_hi),
                 app.app_id in eligible,
             ))
 
@@ -815,6 +892,9 @@ def run(study: Study, n_boot: int = N_BOOT) -> int:
             "min_kept_for_eligible": MIN_KEPT_FOR_ELIGIBLE,
             "min_not_rec_for_eligible": MIN_NOT_REC_FOR_ELIGIBLE,
             "vader_threshold": VADER_POSITIVE_THRESHOLD,
+            "sentiment_model": (
+                {**adopted[0], "positive_cutoff": TRANSFORMER_POSITIVE_CUTOFF} if adopted else None
+            ),
         }
         cur = conn.execute(
             "INSERT INTO analysis_runs (stage, params, git_sha, metrics) VALUES (?, ?, ?, ?)",
@@ -822,7 +902,7 @@ def run(study: Study, n_boot: int = N_BOOT) -> int:
         )
         run_id = int(cur.lastrowid)
         conn.executemany(
-            "INSERT INTO game_stats VALUES (" + ", ".join("?" * 27) + ")",
+            "INSERT INTO game_stats VALUES (" + ", ".join("?" * 30) + ")",
             [(run_id, *row) for row in game_rows],
         )
 
@@ -840,7 +920,7 @@ def run(study: Study, n_boot: int = N_BOOT) -> int:
             point = game_theme_metrics(g)
             ci = bootstrap_game_themes(g, n_boot)
             for j, (lens, theme) in enumerate(theme_keys):
-                rec_in, comp_in, pos_in = theme_sentiment([g], j)
+                rec_in, comp_in, pos_in, model_in = theme_sentiment([g], j)
                 theme_rows.append((
                     lens, theme, SCOPE_GAME, str(app_id), int(g.rec.size),
                     int(g.themes[:, j].sum()),
@@ -849,7 +929,7 @@ def run(study: Study, n_boot: int = N_BOOT) -> int:
                     _num(ci["complaint"][1][j]),
                     _num(point.praise[j]), _num(ci["praise"][0][j]), _num(ci["praise"][1][j]),
                     _num(point.lift[j]), _num(ci["lift"][0][j]), _num(ci["lift"][1][j]),
-                    _num(rec_in), _num(comp_in), _num(pos_in), None, None,
+                    _num(rec_in), _num(comp_in), _num(pos_in), _num(model_in), None, None,
                 ))
 
         # ---- cohort-level stats -------------------------------------------
@@ -871,6 +951,7 @@ def run(study: Study, n_boot: int = N_BOOT) -> int:
             rec_boot = cluster_bootstrap_macro(rec_games, n_boot) if len(rec_games) >= 2 else None
             rec_ci = rec_boot["rec_share"] if rec_boot else nan_ci
             comp_ci = rec_boot["mean_compound"] if rec_boot else nan_ci
+            mp_ci = rec_boot["model_pos"] if rec_boot and adopted else nan_ci
             pooled = [r for a in present for r in by_app[a]]
             h_rec = [r.hours for r in pooled if r.recommended and r.hours is not None]
             h_not = [r.hours for r in pooled if not r.recommended and r.hours is not None]
@@ -882,6 +963,9 @@ def run(study: Study, n_boot: int = N_BOOT) -> int:
                 _num(float(np.mean([g.compound.mean() for g in rec_games])))
                 if rec_games else None,
                 _num(comp_ci[0][0]), _num(comp_ci[1][0]),
+                _num(float(np.mean([g.model_pos.mean() for g in rec_games])))
+                if rec_games and adopted else None,
+                _num(mp_ci[0][0]), _num(mp_ci[1][0]),
             ))
 
             elig_games = [games[a] for a in elig if a in games]
@@ -914,7 +998,7 @@ def run(study: Study, n_boot: int = N_BOOT) -> int:
                             "scope_id": scope_id, "finding": finding,
                             "lift": _num(point.lift[j]), "lift_ci": [_num(lo["lift"]), _num(hi["lift"])],
                         })
-                rec_in, comp_in, pos_in = theme_sentiment(elig_games, j)
+                rec_in, comp_in, pos_in, model_in = theme_sentiment(elig_games, j)
                 theme_rows.append((
                     lens, theme, scope_type, scope_id,
                     int(sum(g.rec.size for g in elig_games)),
@@ -923,7 +1007,7 @@ def run(study: Study, n_boot: int = N_BOOT) -> int:
                     _num(point.complaint[j]), _num(lo["complaint"]), _num(hi["complaint"]),
                     _num(point.praise[j]), _num(lo["praise"]), _num(hi["praise"]),
                     _num(point.lift[j]), _num(lo["lift"]), _num(hi["lift"]),
-                    _num(rec_in), _num(comp_in), _num(pos_in),
+                    _num(rec_in), _num(comp_in), _num(pos_in), _num(model_in),
                     bool(logo[j]) if precision_ok[(lens, theme)] else None, finding,
                 ))
             top, n_rank_tests = _top_themes(
@@ -941,11 +1025,11 @@ def run(study: Study, n_boot: int = N_BOOT) -> int:
                     })
 
         conn.executemany(
-            "INSERT INTO cohort_stats VALUES (" + ", ".join("?" * 15) + ")",
+            "INSERT INTO cohort_stats VALUES (" + ", ".join("?" * 18) + ")",
             [(run_id, *row) for row in cohort_rows],
         )
         conn.executemany(
-            "INSERT INTO theme_stats VALUES (" + ", ".join("?" * 24) + ")",
+            "INSERT INTO theme_stats VALUES (" + ", ".join("?" * 25) + ")",
             [(run_id, *row) for row in theme_rows],
         )
         metrics = {
@@ -962,6 +1046,7 @@ def run(study: Study, n_boot: int = N_BOOT) -> int:
             "ranking_findings": ranking_findings,
             "top_themes": rankings,
             "vader_validation": validation,
+            "sentiment_model": params["sentiment_model"],
             "aspect_precision": precision,
             "aspect_audit_status": "complete" if precision else "labels pending",
             "topic_labels": {str(t): label for t, label in topics},
@@ -1169,6 +1254,84 @@ def reference_checks(study: Study, reference_path: Path) -> int:
         conn.close()
 
 
+LARGE_UNMATCHED_TOPIC_SHARE: float = 0.05
+"""A non-outlier topic holding at least this share of unmatched not-recommended
+reviews is reported as a possible missing theme (report only, no lexicon change)."""
+
+
+def coverage_proxy(study: Study) -> int:
+    """Measure how many not-recommended reviews the lexicon misses, and where they go.
+
+    For each scope (all games, each cohort, each subgroup), the share of
+    not-recommended kept English reviews with no aspect match, pooled, with a
+    Wilson interval, for any v1 aspect and for precision-passing aspects only.
+    The unmatched reviews (any aspect) are then broken down by BERTopic topic.
+
+    Args:
+        study: The study.
+
+    Returns:
+        The new ``analysis_runs.run_id`` (stage ``coverage_proxy``).
+    """
+    from src.aspects import audit_paths, load_lexicon
+    from src.db_setup import create_study_tables
+
+    assert study.aspect_lexicon is not None
+    lexicon = load_lexicon(study.aspect_lexicon)
+    precision = load_audit_precision(audit_paths(study, lexicon)[1])
+    passing = {a for a, p in precision.items() if p["passes"]}
+    conn = sqlite3.connect(study.seed_db)
+    try:
+        create_study_tables(conn)
+        rows = [r for r in load_reviews(conn) if not r.recommended]
+        aspect_sets = load_aspect_sets(conn, lexicon.version)
+        labels = dict(conn.execute("SELECT topic_id, label FROM topics"))
+        scopes: list[tuple[str, str, set[int]]] = [("all", "all", {a.app_id for a in study.apps})]
+        for cohort in dict.fromkeys(a.cohort for a in study.apps):
+            scopes.append((SCOPE_COHORT, cohort, {a.app_id for a in study.apps if a.cohort == cohort}))
+        for sub in dict.fromkeys(a.subgroup for a in study.apps if a.subgroup):
+            scopes.append((SCOPE_SUBGROUP, sub, {a.app_id for a in study.apps if a.subgroup == sub}))
+        out = []
+        for scope_type, scope_id, apps in scopes:
+            rs = [r for r in rows if r.app_id in apps]
+            unmatched = [r for r in rs if not aspect_sets.get(r.document_id)]
+            k_pass = sum(1 for r in rs if not (aspect_sets.get(r.document_id, set()) & passing))
+            n = len(rs)
+            topic_counts: dict[int, int] = {}
+            for r in unmatched:
+                topic_counts[r.topic_id] = topic_counts.get(r.topic_id, 0) + 1
+            nr_topic: dict[int, int] = {}
+            for r in rs:
+                nr_topic[r.topic_id] = nr_topic.get(r.topic_id, 0) + 1
+            top = sorted(topic_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:8]
+            out.append({
+                "scope_type": scope_type, "scope_id": scope_id, "n_not_recommended": n,
+                "unmatched_any": len(unmatched),
+                "unmatched_any_share": _num(len(unmatched) / n) if n else None,
+                "unmatched_any_ci": list(wilson_interval(len(unmatched), n)) if n else None,
+                "unmatched_passing": k_pass,
+                "unmatched_passing_share": _num(k_pass / n) if n else None,
+                "unmatched_passing_ci": list(wilson_interval(k_pass, n)) if n else None,
+                "top_unmatched_topics": [
+                    {"topic_id": t, "label": labels.get(t, ""), "count": c,
+                     "share_of_unmatched": _num(c / len(unmatched)),
+                     "unmatched_rate_in_topic": _num(c / nr_topic[t]),
+                     "large": t != -1 and c / len(unmatched) >= LARGE_UNMATCHED_TOPIC_SHARE}
+                    for t, c in top
+                ],
+            })
+        metrics = {"lexicon_version": lexicon.version, "passing_aspects": sorted(passing),
+                   "large_topic_share": LARGE_UNMATCHED_TOPIC_SHARE, "scopes": out}
+        cur = conn.execute(
+            "INSERT INTO analysis_runs (stage, params, git_sha, metrics) VALUES (?, ?, ?, ?)",
+            ("coverage_proxy", json.dumps({"study": study.name}), _git_sha(), json.dumps(metrics)),
+        )
+        conn.commit()
+        return int(cur.lastrowid)
+    finally:
+        conn.close()
+
+
 def main() -> None:
     """CLI entry point: compute stats, optionally run reference checks."""
     parser = argparse.ArgumentParser(description="Compute study statistics.")
@@ -1178,9 +1341,15 @@ def main() -> None:
         "--reference", type=Path, default=None,
         help="Private research JSON for reference checks (read only, never copied).",
     )
+    parser.add_argument(
+        "--coverage", action="store_true",
+        help="Store the lexicon coverage proxy (unmatched not-recommended reviews by topic).",
+    )
     args = parser.parse_args()
     study = load_study(args.study)
-    if args.reference is not None:
+    if args.coverage:
+        coverage_proxy(study)
+    elif args.reference is not None:
         reference_checks(study, args.reference)
     else:
         run(study, n_boot=args.n_boot)

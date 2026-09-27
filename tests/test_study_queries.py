@@ -14,10 +14,11 @@ from dashboard.queries import (
     get_latest_run,
     get_pull_windows,
     get_recommend_share_by_game,
+    get_sentiment_validation,
     get_theme_stats,
     has_study_tables,
 )
-from src.db_setup import create_study_tables
+from src.db_setup import create_scores_tables, create_study_tables
 
 
 @pytest.fixture()
@@ -129,3 +130,17 @@ def test_get_recommend_share_by_game_with_aspect_filter(conn: sqlite3.Connection
     df = get_recommend_share_by_game(conn, aspects=["map_design"])
     assert df["n"].tolist() == [1]
     assert df["rec_share"].tolist() == [1.0]
+
+
+def test_sentiment_validation_reads_scores_sidecar() -> None:
+    """A database without analysis_runs gives None; the newest run wins otherwise."""
+    db = sqlite3.connect(":memory:")
+    assert get_sentiment_validation(db) is None
+    create_scores_tables(db)
+    assert get_sentiment_validation(db) is None
+    for selected in ("distilbert_sst2", "roberta_large"):
+        db.execute(
+            "INSERT INTO analysis_runs (stage, params, metrics) VALUES ('sentiment_validation', '{}', ?)",
+            (json.dumps({"selected": selected}),),
+        )
+    assert get_sentiment_validation(db) == {"selected": "roberta_large"}

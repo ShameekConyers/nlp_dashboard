@@ -90,6 +90,23 @@ VADER_POSITIVE_THRESHOLD: float = 0.05
 VADER_NEGATIVE_THRESHOLD: float = -0.05
 """Compound score <= this is classified as negative sentiment."""
 
+TRANSFORMER_CANDIDATES: dict[str, str] = {
+    "siebert/sentiment-roberta-large-english": "74cea614e245b0832c770ec9aa51bd58df965b9c",
+    "distilbert/distilbert-base-uncased-finetuned-sst-2-english": (
+        "714eb0fa89d2f80546fda750413ed43d93601a13"
+    ),
+}
+"""Transformer sentiment candidates (Decision 11): Hugging Face name -> pinned revision."""
+
+TRANSFORMER_POSITIVE_CUTOFF: float = 0.5
+"""A transformer scores a text positive when its positive probability is at least this."""
+
+HEAD_TOKENS: int = 256
+"""Tokens kept from the start of a long input (head+tail truncation)."""
+
+TAIL_TOKENS: int = 254
+"""Tokens kept from the end of a long input; head, tail and two special tokens make 512."""
+
 # ---------------------------------------------------------------------------
 # Topic modeling (Phase 4)
 # ---------------------------------------------------------------------------

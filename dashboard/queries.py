@@ -554,6 +554,26 @@ def get_latest_run(conn: sqlite3.Connection, stage: str = "stats") -> tuple[int,
     return int(row[0]), json.loads(row[1])
 
 
+def get_sentiment_validation(conn: sqlite3.Connection) -> dict | None:
+    """Return the newest transformer sentiment validation metrics, if any.
+
+    Args:
+        conn: Connection to a study's scores database (the market seed, or
+            the April scores sidecar).
+
+    Returns:
+        The ``sentiment_validation`` metrics dictionary, or None when the
+        database has no such run.
+    """
+    has_runs = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'analysis_runs'"
+    ).fetchone()
+    if has_runs is None:
+        return None
+    run = get_latest_run(conn, "sentiment_validation")
+    return run[1] if run else None
+
+
 def get_cohort_options(conn: sqlite3.Connection) -> list[str]:
     """Return the study's cohorts in display order.
 

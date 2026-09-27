@@ -8,6 +8,8 @@ seed_db = "data/seed.db"
 full_db = "data/full.db"
 raw_dir = "data/raw"
 language_filter = false
+# Transformer scores live beside the seed so data/seed.db keeps its hash (Decision 12).
+scores_db = "data/seed_transformer_scores.db"
 
 [sampling]
 method = "stratified_legacy"  # 50/50 recommended per game, built by db_setup.build_seed_db

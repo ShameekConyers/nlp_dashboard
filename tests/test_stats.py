@@ -225,3 +225,72 @@ def test_ranking_findings_only_on_complaint_side_of_cohort_scopes() -> None:
     top_all, n_all = _top_themes(keys, point, ci, ok, logo, n_eligible=5, is_cohort_scope=False)
     assert top_all["aspect_complaint"][0]["status"] == "descriptive"
     assert n_all == 0
+
+
+def test_coverage_proxy_counts_unmatched_not_recommended_reviews(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unmatched share counts not-recommended reviews with no aspect, by topic."""
+    from src.aspects import run as run_aspects
+    from src.stats import coverage_proxy
+
+    monkeypatch.setattr("src.aspects.DATA_DIR", tmp_path)  # no audit labels: nothing passes
+    study = _make_seed(tmp_path)
+    run_aspects(study)
+    run_id = coverage_proxy(study)
+    conn = sqlite3.connect(study.seed_db)
+    metrics = json.loads(conn.execute(
+        "SELECT metrics FROM analysis_runs WHERE run_id = ?", (run_id,)).fetchone()[0])
+    conn.close()
+    overall = metrics["scopes"][0]
+    # 3 games x 40 + 5 not recommended; every third mentions maps (14 + 14 + 14 + 2 tagged).
+    assert (overall["n_not_recommended"], overall["unmatched_any"]) == (125, 81)
+    assert overall["unmatched_passing"] == 125
+    assert overall["top_unmatched_topics"][0]["topic_id"] == -1
+    assert not overall["top_unmatched_topics"][0]["large"]
+
+
+def test_run_uses_adopted_transformer_for_sentiment_views(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With an adopted model, game, cohort and theme rows carry its positive share."""
+    from src.aspects import run as run_aspects
+
+    monkeypatch.setattr("src.aspects.DATA_DIR", tmp_path)
+    study = _make_seed(tmp_path)
+    run_aspects(study)
+    conn = sqlite3.connect(study.seed_db)
+    conn.execute("INSERT INTO sentiment_models (model_id, model_name, model_revision) "
+                 "VALUES (7, 'm/x', 'r1')")
+    conn.execute(
+        "INSERT INTO sentiment_scores SELECT id, 7, 'doc', -1, "
+        "CASE WHEN recommended THEN 0.9 ELSE 0.1 END FROM documents"
+    )
+    conn.execute(
+        "INSERT INTO analysis_runs (stage, params, metrics) VALUES ('sentiment_validation', '{}', ?)",
+        (json.dumps({"adopted": True, "selected": "x",
+                     "models": {"x": {"model_name": "m/x", "revision": "r1"}}}),),
+    )
+    conn.commit()
+    conn.close()
+    run_id = run(study, n_boot=50)
+
+    conn = sqlite3.connect(study.seed_db)
+    shares = conn.execute(
+        "SELECT model_pos_share, seed_rec_share FROM game_stats WHERE run_id = ?", (run_id,)
+    ).fetchall()
+    cohort = conn.execute(
+        "SELECT macro_model_pos_share, macro_model_pos_ci_low FROM cohort_stats "
+        "WHERE run_id = ? AND scope_type = 'cohort'", (run_id,)
+    ).fetchone()
+    theme = conn.execute(
+        "SELECT model_pos_share, rec_share_in_theme FROM theme_stats WHERE run_id = ? "
+        "AND lens = 'topic' AND scope_type = 'cohort'", (run_id,)
+    ).fetchone()
+    params = json.loads(conn.execute(
+        "SELECT params FROM analysis_runs WHERE run_id = ?", (run_id,)).fetchone()[0])
+    conn.close()
+    assert all(m == pytest.approx(r) for m, r in shares)
+    assert cohort[0] is not None and cohort[1] is not None
+    assert theme[0] == pytest.approx(theme[1])
+    assert params["sentiment_model"]["model_name"] == "m/x"

@@ -105,6 +105,9 @@ class Study:
             or None for no merging.
         topic_umap_preset: UMAP preset name from ``[topics]`` (see
             ``topics.UMAP_PRESETS``); ``legacy`` when absent.
+        scores_db: Database for transformer sentiment scores. Defaults to
+            ``seed_db``; the April study points at a sidecar so its frozen
+            seed file never changes.
     """
 
     name: str
@@ -120,6 +123,12 @@ class Study:
     topic_min_size: int | None = None
     topic_nr_topics: int | None = None
     topic_umap_preset: str = "legacy"
+    scores_db: Path | None = None
+
+    @property
+    def scores_path(self) -> Path:
+        """Return the database that holds this study's transformer scores."""
+        return self.scores_db if self.scores_db is not None else self.seed_db
 
     def app(self, app_id: int) -> AppSpec:
         """Return the app spec for an app ID.
@@ -227,4 +236,5 @@ def load_study(path: Path = DEFAULT_STUDY_PATH) -> Study:
         topic_min_size=topics.get("min_topic_size"),
         topic_nr_topics=topics.get("nr_topics"),
         topic_umap_preset=topics.get("umap_preset", "legacy"),
+        scores_db=_resolve(meta["scores_db"]) if "scores_db" in meta else None,
     )

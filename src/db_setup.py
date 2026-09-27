@@ -190,6 +190,9 @@ CREATE TABLE IF NOT EXISTS game_stats (
     early_access_share     REAL,
     mean_compound          REAL,
     vader_pos_share        REAL,
+    model_pos_share        REAL,
+    model_pos_ci_low       REAL,
+    model_pos_ci_high      REAL,
     eligible               BOOLEAN NOT NULL,
     PRIMARY KEY (run_id, app_id)
 );
@@ -210,6 +213,9 @@ CREATE TABLE IF NOT EXISTS cohort_stats (
     macro_mean_compound  REAL,
     macro_compound_ci_low  REAL,
     macro_compound_ci_high REAL,
+    macro_model_pos_share  REAL,
+    macro_model_pos_ci_low REAL,
+    macro_model_pos_ci_high REAL,
     PRIMARY KEY (run_id, scope_type, scope_id)
 );
 
@@ -236,6 +242,7 @@ CREATE TABLE IF NOT EXISTS theme_stats (
     rec_share_in_theme REAL,
     mean_compound   REAL,
     vader_pos_share REAL,
+    model_pos_share REAL,     -- share scored positive by the adopted transformer (NULL if none)
     logo_stable     BOOLEAN,  -- NULL where the theme failed the precision gate
     finding         TEXT,
     PRIMARY KEY (run_id, lens, theme, scope_type, scope_id)
@@ -243,6 +250,38 @@ CREATE TABLE IF NOT EXISTS theme_stats (
 
 CREATE INDEX IF NOT EXISTS idx_aspect_mentions_aspect ON aspect_mentions(aspect);
 CREATE INDEX IF NOT EXISTS idx_theme_stats_scope ON theme_stats(run_id, scope_type, scope_id);
+"""
+
+# Transformer score tables. Also used on their own for a scores sidecar next
+# to the frozen April seed, which has no documents table, so document_id
+# carries no foreign key. sentence_idx is -1 for document-level rows. Each
+# score row carries a small model_id; sentiment_models maps it to the model
+# name and pinned revision, which keeps the committed seed inside its size cap.
+_SCORES_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS analysis_runs (
+    run_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    stage      TEXT NOT NULL,
+    params     TEXT NOT NULL,
+    git_sha    TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    metrics    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sentiment_models (
+    model_id       INTEGER PRIMARY KEY,
+    model_name     TEXT NOT NULL,
+    model_revision TEXT NOT NULL,
+    UNIQUE (model_name, model_revision)
+);
+
+CREATE TABLE IF NOT EXISTS sentiment_scores (
+    document_id    INTEGER NOT NULL,
+    model_id       INTEGER NOT NULL REFERENCES sentiment_models(model_id),
+    unit           TEXT NOT NULL CHECK (unit IN ('doc', 'sentence')),
+    sentence_idx   INTEGER NOT NULL,
+    positive_prob  REAL NOT NULL,
+    PRIMARY KEY (document_id, model_id, unit, sentence_idx)
+) WITHOUT ROWID;
 """
 
 
@@ -257,6 +296,19 @@ def create_study_tables(conn: sqlite3.Connection) -> None:
     """
     create_tables(conn)
     conn.executescript(_STUDY_SCHEMA_SQL)
+    conn.executescript(_SCORES_SCHEMA_SQL)
+
+
+def create_scores_tables(conn: sqlite3.Connection) -> None:
+    """Create only ``analysis_runs``, ``sentiment_models`` and ``sentiment_scores``.
+
+    Used for a transformer-scores sidecar database, such as the one beside the
+    April seed, whose own file must not change.
+
+    Args:
+        conn: Active SQLite connection.
+    """
+    conn.executescript(_SCORES_SCHEMA_SQL)
 
 
 def load_raw_json(json_path: Path) -> list[dict]:
