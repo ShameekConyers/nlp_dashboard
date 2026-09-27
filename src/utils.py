@@ -100,6 +100,9 @@ TRANSFORMER_CANDIDATES: dict[str, str] = {
 
 SENTENCE_TRANSFORMER_CANDIDATES: dict[str, str] = {
     "cardiffnlp/twitter-roberta-base-sentiment-latest": "3216a57f2a0d9c45a2e6c20157c20c49fb4bf9c7",
+    "j-hartmann/sentiment-roberta-large-english-3-classes": (
+        "81cdc0fe3eee1bc18d95ffdfb56b2151a39c9007"
+    ),
 }
 """Three-class (negative, neutral, positive) candidates for aspect sentences only
 (plan decision 14). Review-level candidates stay in ``TRANSFORMER_CANDIDATES``."""

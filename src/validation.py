@@ -101,36 +101,80 @@ def sentence_class(prob: float, band: tuple[float, float]) -> str:
     return "neither"
 
 
-def sentence_class3(positive: float, neutral: float) -> str:
-    """Map a three-class model's probabilities to their argmax class.
+def sentence_class3(positive: float, neutral: float, neutral_threshold: float | None = None) -> str:
+    """Map a three-class model's probabilities to a class.
+
+    Without a threshold the class is the argmax. With one, the sentence is
+    ``neither`` when P(neutral) is at least the threshold, otherwise whichever
+    of positive and negative is larger.
 
     Args:
         positive: P(positive).
         neutral: P(neutral); P(negative) is the remainder.
+        neutral_threshold: Optional cut on P(neutral).
 
     Returns:
         ``positive``, ``negative`` or ``neither`` (the neutral head).
     """
     negative = 1.0 - positive - neutral
+    if neutral_threshold is not None:
+        if neutral >= neutral_threshold:
+            return "neither"
+        return "positive" if positive >= negative else "negative"
     best = max(("positive", positive), ("negative", negative), ("neither", neutral),
                key=lambda kv: kv[1])
     return best[0]
 
 
-def classify_sentence(positive: float, neutral: float | None, band: tuple[float, float]) -> str:
+def classify_sentence(
+    positive: float,
+    neutral: float | None,
+    band: tuple[float, float],
+    neutral_threshold: float | None = None,
+) -> str:
     """Classify one sentence score from either kind of model.
 
     Args:
         positive: P(positive).
         neutral: P(neutral) for a three-class model, None for a binary one.
         band: Neither band used when ``neutral`` is None.
+        neutral_threshold: Optional P(neutral) cut for a three-class model.
 
     Returns:
         The class name.
     """
     if neutral is None:
         return sentence_class(positive, band)
-    return sentence_class3(positive, neutral)
+    return sentence_class3(positive, neutral, neutral_threshold)
+
+
+def tune_neutral_threshold(
+    y_true: Sequence[str],
+    probs: Sequence[tuple[float, float]],
+    grid: Sequence[float],
+    classes: Sequence[str],
+    anchor: float,
+) -> tuple[float, float]:
+    """Pick the P(neutral) threshold with the highest macro-F1, ties nearest ``anchor``.
+
+    Args:
+        y_true: Three-class labels.
+        probs: ``(P(positive), P(neutral))`` per sentence, aligned with ``y_true``.
+        grid: Candidate thresholds.
+        classes: Classes averaged by ``macro_f1_multiclass``.
+        anchor: Tie-break value.
+
+    Returns:
+        ``(threshold, macro_f1)``.
+    """
+    best_t, best_f1 = grid[0], -1.0
+    for t in grid:
+        f1 = macro_f1_multiclass(y_true, [sentence_class3(p, n, t) for p, n in probs], classes)
+        if f1 > best_f1 + 1e-12 or (
+            abs(f1 - best_f1) <= 1e-12 and abs(t - anchor) < abs(best_t - anchor)
+        ):
+            best_t, best_f1 = t, f1
+    return float(best_t), float(best_f1)
 
 
 def tune_band(

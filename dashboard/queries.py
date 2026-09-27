@@ -862,11 +862,13 @@ def get_aspect_sentence_sentiment(
     model_name: str,
     revision: str,
     band: tuple[float, float] | None,
+    neutral_threshold: float | None = None,
 ) -> pd.DataFrame:
     """Count aspect sentences by sentence-level class per aspect and game.
 
     Each distinct tagged sentence is classified once per aspect it carries:
-    by argmax for a three-class model, or by ``band`` for a binary one.
+    by argmax (or ``neutral_threshold``) for a three-class model, or by
+    ``band`` for a binary one.
 
     Args:
         conn: Open study connection with sentence scores.
@@ -874,6 +876,7 @@ def get_aspect_sentence_sentiment(
         revision: Its pinned revision.
         band: Neither band for a binary model; ignored when the model stores
             a neutral probability.
+        neutral_threshold: Optional P(neutral) cut for a three-class model.
 
     Returns:
         DataFrame with ``aspect``, ``app_id``, ``app_name``, ``negative``,
@@ -899,7 +902,7 @@ def get_aspect_sentence_sentiment(
         return pd.DataFrame(columns=["aspect", "app_id", "app_name", *classes, "n"])
     fallback = band or (0.5, 0.5)
     rows["cls"] = [
-        classify_sentence(p, None if pd.isna(n) else float(n), fallback)
+        classify_sentence(p, None if pd.isna(n) else float(n), fallback, neutral_threshold)
         for p, n in zip(rows["positive_prob"], rows["neutral_prob"])
     ]
     counts = (

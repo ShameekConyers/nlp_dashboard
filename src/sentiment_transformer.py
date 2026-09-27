@@ -59,6 +59,7 @@ from src.validation import (
     macro_f1,
     macro_f1_multiclass,
     tune_band,
+    tune_neutral_threshold,
     tune_threshold,
 )
 
@@ -77,6 +78,7 @@ SHORT_NAMES: dict[str, str] = {
     "siebert/sentiment-roberta-large-english": "roberta_large",
     "distilbert/distilbert-base-uncased-finetuned-sst-2-english": "distilbert_sst2",
     "cardiffnlp/twitter-roberta-base-sentiment-latest": "roberta_base_3class",
+    "j-hartmann/sentiment-roberta-large-english-3-classes": "roberta_large_3class",
 }
 """Short keys used in metrics JSON."""
 
@@ -92,7 +94,7 @@ ADOPTION_RULE: str = (
     "the market test split lies above 0 against VADER at 0.05 and at the dev-tuned threshold."
 )
 
-SENTENCE_AUDIT_VERSIONS: dict[str, int] = {"v1": 100, "v2": 200}
+SENTENCE_AUDIT_VERSIONS: dict[str, int] = {"v1": 100, "v2": 200, "v3": 200}
 """Sentence audit sets in order: version -> size. Each later set excludes the
 sentences of every earlier one."""
 
@@ -100,8 +102,15 @@ SENTENCE_AUDIT_VERSION: str = "v1"
 """The first audit set: the 7.3 test read, re-used as the development set for
 the v2 candidate selection (plan decision 14)."""
 
-SENTENCE_TEST_VERSION: str = "v2"
-"""The fresh test set read once for the three-class gate."""
+SENTENCE_TEST_VERSION: str = "v3"
+"""The fresh test set read once for the current gate attempt (plan decision 15).
+``v2`` was the previous attempt's test set and is now development data."""
+
+NEUTRAL_THRESHOLD_GRID: tuple[float, ...] = tuple(round(0.10 + 0.05 * i, 2) for i in range(13))
+"""P(neutral) cuts tried on the development set for a three-class model: 0.10 to
+0.70 in steps of 0.05, ties to the cut nearest 0.50 (plan decision 15)."""
+
+NEUTRAL_THRESHOLD_ANCHOR: float = 0.50
 
 SENTENCE_AUDIT_SEED: int = 20260927
 SENTENCE_LABELS: tuple[str, ...] = ("positive", "negative", "neither")
@@ -121,10 +130,13 @@ candidate: c from 0.05 to 0.45 in steps of 0.05, ties to the c nearest 0.20."""
 NEITHER_BAND_ANCHOR: float = SENTENCE_NEITHER_BAND[0]
 
 SELECTION_RULE: str = (
-    "Candidates: each three-class model by argmax over negative, neutral and positive; the "
-    "adopted binary model with a symmetric neither band tuned on the development labels. "
-    "Select the highest development three-class macro-F1, ties to the three-class model. "
-    "Read the fresh test set only if the selected candidate reaches the gate on development."
+    "Candidates: each three-class model by argmax over negative, neutral and positive, and "
+    "with a P(neutral) threshold tuned on the development labels (neither at or above it, "
+    "else the larger of positive and negative); optionally the adopted binary model with a "
+    "symmetric neither band tuned on the same labels. Select the highest development "
+    "three-class macro-F1, ties to argmax over a tuned rule, then to the earlier-listed "
+    "(smaller) model. Read the fresh test set only if the selected candidate reaches the "
+    "gate on development."
 )
 
 
@@ -948,16 +960,19 @@ def _audit_predictions(
     labels: Sequence[Mapping[str, str]],
     model_name: str,
     band: tuple[float, float],
+    neutral_threshold: float | None = None,
 ) -> tuple[list[str], list[str], list[tuple[float, float | None]]]:
     """Return labels, predicted classes and stored probabilities for audit rows.
 
-    A three-class model is classified by argmax, a binary one by ``band``.
+    A three-class model is classified by argmax, or by ``neutral_threshold``
+    when given; a binary one by ``band``.
 
     Args:
         study: The market study; its scores database is opened read-only.
         labels: Rows of a committed label file.
         model_name: Hugging Face id of a scored model.
         band: Neither band for a binary model.
+        neutral_threshold: Optional P(neutral) cut for a three-class model.
 
     Returns:
         ``(y_true, y_pred, [(positive_prob, neutral_prob or None), ...])``.
@@ -970,8 +985,20 @@ def _audit_predictions(
         conn.close()
     y_true = [r["label"] for r in labels]
     probs = [stored[(ids[r["steam_review_id"]], int(r["sentence_idx"]))] for r in labels]
-    y_pred = [classify_sentence(p, n, band) for p, n in probs]
+    y_pred = [classify_sentence(p, n, band, neutral_threshold) for p, n in probs]
     return y_true, y_pred, probs
+
+
+def load_dev_labels(versions: Sequence[str]) -> list[dict[str, str]]:
+    """Concatenate the committed label files of several audit versions.
+
+    Args:
+        versions: Keys of ``SENTENCE_AUDIT_VERSIONS``.
+
+    Returns:
+        Label rows in version order.
+    """
+    return [row for v in versions for row in load_sentence_labels(v)]
 
 
 def _binary_pred(positive: float, neutral: float | None) -> bool:
@@ -1010,70 +1037,99 @@ def _store_run(study: Study, stage: str, params: dict[str, Any], metrics: dict[s
 
 
 def sentence_dev_selection(
-    study: Study, dev_version: str = SENTENCE_AUDIT_VERSION, unfreeze: bool = False
+    study: Study,
+    dev_versions: Sequence[str] = (SENTENCE_AUDIT_VERSION,),
+    models: Sequence[str] = tuple(SENTENCE_TRANSFORMER_CANDIDATES),
+    with_threshold: bool = True,
+    with_band: bool = False,
+    unfreeze: bool = False,
 ) -> dict[str, Any]:
-    """Select the sentence-sentiment candidate on the development labels (plan decision 14).
+    """Select the sentence-sentiment candidate on development labels (plan decisions 14, 15).
 
-    Every three-class candidate is classified by argmax. The adopted binary
-    model gets a symmetric neither band tuned on the same labels. The
-    candidate with the highest development macro-F1 is selected, ties to a
-    three-class model, and ``proceed`` says whether it reaches the gate, which
-    is the condition for reading the fresh test set.
+    Every three-class model is a candidate by argmax and, with
+    ``with_threshold``, by a P(neutral) cut tuned on the same labels. With
+    ``with_band`` the adopted binary model joins with a symmetric neither band
+    tuned likewise. The candidate with the highest development macro-F1 is
+    selected, ties to argmax over a tuned rule and then to the earlier-listed
+    model, and ``proceed`` says whether it reaches the gate, which is the
+    condition for reading the fresh test set.
 
     Args:
         study: The market study.
-        dev_version: Label set used for selection and calibration.
+        dev_versions: Label sets concatenated for selection and calibration.
+        models: Three-class models to consider, in tie-break order.
+        with_threshold: Also try the tuned P(neutral) cut for each model.
+        with_band: Also try the adopted binary model with a tuned band.
         unfreeze: Allow writing a frozen (shipped) study's scores database.
 
     Returns:
         The metrics dictionary, also stored as a ``sentence_dev_selection`` run.
+        Candidate keys are ``<model>|<classification>``.
 
     Raises:
         FrozenStudyError: If a target belongs to a frozen study and ``unfreeze``
             is False.
-        ValueError: If no transformer was adopted for the study.
+        ValueError: If ``with_band`` is set and no transformer was adopted.
     """
     guard_writable([study.scores_path], unfreeze)
-    labels = load_sentence_labels(dev_version)
+    labels = load_dev_labels(dev_versions)
     y_true = [r["label"] for r in labels]
-    conn = _read_only(study.scores_path)
-    try:
-        validation = latest_validation(conn)
-    finally:
-        conn.close()
-    if validation is None or not validation["adopted"]:
-        raise ValueError(f"{study.name}: no adopted transformer; run validate first.")
-    binary_name = validation["models"][validation["selected"]]["model_name"]
     candidates: dict[str, dict[str, Any]] = {}
-    for name in SENTENCE_TRANSFORMER_CANDIDATES:
-        _, y_pred, _ = _audit_predictions(study, labels, name, SENTENCE_NEITHER_BAND)
-        candidates[name] = {
-            "classification": "argmax", "neither_band": None,
+    for name in models:
+        _, y_pred, probs = _audit_predictions(study, labels, name, SENTENCE_NEITHER_BAND)
+        candidates[f"{name}|argmax"] = {
+            "model_name": name, "classification": "argmax", "neither_band": None,
+            "neutral_threshold": None,
             "macro_f1_3class": macro_f1_multiclass(y_true, y_pred, SENTENCE_LABELS),
         }
-    _, fixed_pred, probs = _audit_predictions(study, labels, binary_name, SENTENCE_NEITHER_BAND)
-    band, band_f1 = tune_band([*y_true], [p for p, _ in probs], NEITHER_BAND_GRID,
-                              SENTENCE_LABELS, NEITHER_BAND_ANCHOR)
-    candidates[binary_name] = {
-        "classification": "band", "neither_band": list(band), "macro_f1_3class": band_f1,
-        "fixed_band": list(SENTENCE_NEITHER_BAND),
-        "fixed_band_macro_f1": macro_f1_multiclass(y_true, fixed_pred, SENTENCE_LABELS),
-    }
-    order = [*SENTENCE_TRANSFORMER_CANDIDATES, binary_name]
-    selected = max(order, key=lambda k: (candidates[k]["macro_f1_3class"], -order.index(k)))
+        if with_threshold:
+            pairs = [(p, n) for p, n in probs if n is not None]
+            t, t_f1 = tune_neutral_threshold(y_true, pairs, NEUTRAL_THRESHOLD_GRID,
+                                             SENTENCE_LABELS, NEUTRAL_THRESHOLD_ANCHOR)
+            candidates[f"{name}|neutral_threshold"] = {
+                "model_name": name, "classification": "neutral_threshold", "neither_band": None,
+                "neutral_threshold": t, "macro_f1_3class": t_f1,
+            }
+    if with_band:
+        conn = _read_only(study.scores_path)
+        try:
+            validation = latest_validation(conn)
+        finally:
+            conn.close()
+        if validation is None or not validation["adopted"]:
+            raise ValueError(f"{study.name}: no adopted transformer; run validate first.")
+        binary_name = validation["models"][validation["selected"]]["model_name"]
+        _, fixed_pred, probs = _audit_predictions(study, labels, binary_name, SENTENCE_NEITHER_BAND)
+        band, band_f1 = tune_band(y_true, [p for p, _ in probs], NEITHER_BAND_GRID,
+                                  SENTENCE_LABELS, NEITHER_BAND_ANCHOR)
+        candidates[f"{binary_name}|band"] = {
+            "model_name": binary_name, "classification": "band", "neither_band": list(band),
+            "neutral_threshold": None, "macro_f1_3class": band_f1,
+            "fixed_band": list(SENTENCE_NEITHER_BAND),
+            "fixed_band_macro_f1": macro_f1_multiclass(y_true, fixed_pred, SENTENCE_LABELS),
+        }
+    order = list(candidates)
+    rank = {"argmax": 0, "neutral_threshold": 1, "band": 2}
+    selected = max(order, key=lambda k: (candidates[k]["macro_f1_3class"],
+                                         -rank[candidates[k]["classification"]],
+                                         -order.index(k)))
+    chosen = candidates[selected]
     metrics = {
         "selection_rule": SELECTION_RULE,
-        "dev_version": dev_version, "n": len(labels),
+        "dev_versions": list(dev_versions), "n": len(labels),
         "label_counts": {c: y_true.count(c) for c in SENTENCE_LABELS},
-        "band_grid": list(NEITHER_BAND_GRID),
+        "neutral_threshold_grid": list(NEUTRAL_THRESHOLD_GRID) if with_threshold else None,
+        "band_grid": list(NEITHER_BAND_GRID) if with_band else None,
         "candidates": candidates,
         "selected": selected,
-        "selected_revision": ALL_MODELS[selected],
+        "selected_model": chosen["model_name"],
+        "selected_revision": ALL_MODELS[chosen["model_name"]],
         "gate": SENTENCE_GATE_MACRO_F1,
-        "proceed": candidates[selected]["macro_f1_3class"] >= SENTENCE_GATE_MACRO_F1,
+        "proceed": chosen["macro_f1_3class"] >= SENTENCE_GATE_MACRO_F1,
     }
     _store_run(study, "sentence_dev_selection",
-               {"study": study.name, "labels": sentence_audit_paths(dev_version)[1].name}, metrics)
+               {"study": study.name,
+                "labels": [sentence_audit_paths(v)[1].name for v in dev_versions]}, metrics)
     return metrics
 
 
@@ -1083,6 +1139,7 @@ def sentence_audit_metrics(
     version: str = SENTENCE_AUDIT_VERSION,
     band: tuple[float, float] = SENTENCE_NEITHER_BAND,
     unfreeze: bool = False,
+    neutral_threshold: float | None = None,
 ) -> dict[str, Any]:
     """Score one version's committed sentence labels against one model's sentence scores.
 
@@ -1092,6 +1149,7 @@ def sentence_audit_metrics(
         version: A key of ``SENTENCE_AUDIT_VERSIONS``.
         band: Neither band for a binary model; ignored for a three-class model.
         unfreeze: Allow writing a frozen (shipped) study's scores database.
+        neutral_threshold: P(neutral) cut for a three-class model; None for argmax.
 
     Returns:
         Macro-F1 over three classes (the gate), binary macro-F1 on sentences
@@ -1104,19 +1162,26 @@ def sentence_audit_metrics(
     """
     guard_writable([study.scores_path], unfreeze)
     labels = load_sentence_labels(version)
-    y_true, y_pred, probs = _audit_predictions(study, labels, model_name, band)
+    y_true, y_pred, probs = _audit_predictions(study, labels, model_name, band, neutral_threshold)
     three_class = bool(probs) and probs[0][1] is not None
     binary = [(t == "positive", _binary_pred(p, n)) for t, (p, n) in zip(y_true, probs)
               if t != "neither"]
     confusion = {t: {p: sum(1 for a, b in zip(y_true, y_pred) if a == t and b == p)
                      for p in SENTENCE_LABELS} for t in SENTENCE_LABELS}
     f1 = macro_f1_multiclass(y_true, y_pred, SENTENCE_LABELS)
+    if not three_class:
+        classification = "band"
+    elif neutral_threshold is not None:
+        classification = "neutral_threshold"
+    else:
+        classification = "argmax"
     metrics = {
         "audit_version": version,
         "model_name": model_name, "model_revision": ALL_MODELS[model_name], "n": len(labels),
         "label_counts": {c: y_true.count(c) for c in SENTENCE_LABELS},
-        "classification": "argmax" if three_class else "band",
+        "classification": classification,
         "neither_band": None if three_class else list(band),
+        "neutral_threshold": neutral_threshold if three_class else None,
         "macro_f1_3class": f1,
         "binary_n": len(binary),
         "binary_macro_f1": macro_f1([b[0] for b in binary], [b[1] for b in binary])
@@ -1237,15 +1302,24 @@ def main() -> None:
     p.add_argument("--version", choices=versions, default=SENTENCE_TEST_VERSION)
     p = sub.add_parser("dev-select", help="Select the sentence candidate on development labels.")
     p.add_argument("--study", type=Path, required=True)
-    p.add_argument("--dev-version", choices=versions, default=SENTENCE_AUDIT_VERSION)
+    p.add_argument("--dev-versions", default=SENTENCE_AUDIT_VERSION,
+                   help="Comma-separated label sets concatenated as development data.")
+    p.add_argument("--models", default=",".join(SENTENCE_TRANSFORMER_CANDIDATES),
+                   help="Comma-separated three-class model ids, in tie-break order.")
+    p.add_argument("--no-threshold", dest="with_threshold", action="store_false",
+                   help="Skip the tuned P(neutral) threshold variants.")
+    p.add_argument("--with-band", action="store_true",
+                   help="Also try the adopted binary model with a tuned neither band.")
     p.add_argument(UNFREEZE_FLAG, dest="unfreeze", action="store_true", help=UNFREEZE_HELP)
     p = sub.add_parser("audit-metrics", help="Score one sentence audit set (the test read).")
     p.add_argument("--study", type=Path, required=True)
     p.add_argument("--version", choices=versions, default=SENTENCE_TEST_VERSION)
     p.add_argument("--model", default=None,
-                   help="Model id; default the model selected for the version (validate for "
-                        "v1, dev-select for later versions).")
+                   help="Model id; default the model and rule selected for the version "
+                        "(validate for v1, the newest dev-select for later versions).")
     p.add_argument("--band", default=None, help="Neither band low,high for a binary model.")
+    p.add_argument("--neutral-threshold", type=float, default=None,
+                   help="P(neutral) cut for a three-class model; omit for argmax.")
     p.add_argument(UNFREEZE_FLAG, dest="unfreeze", action="store_true", help=UNFREEZE_HELP)
     p = sub.add_parser("reference-check", help="Decision 14 sentence-sentiment check.")
     p.add_argument("--study", type=Path, required=True)
@@ -1261,8 +1335,8 @@ def main() -> None:
 
 def _selected_sentence_model(
     study: Study, version: str, band: tuple[float, float]
-) -> tuple[str, tuple[float, float]]:
-    """Return the model and band the pre-registration selected for an audit version.
+) -> tuple[str, tuple[float, float], float | None]:
+    """Return the model and rule the pre-registration selected for an audit version.
 
     ``v1`` uses the Decision 11 adopted model with the fixed band. Later
     versions use the newest ``sentence_dev_selection`` run, which must have
@@ -1274,7 +1348,7 @@ def _selected_sentence_model(
         band: Fallback band for a binary model.
 
     Returns:
-        ``(model_name, band)``.
+        ``(model_name, band, neutral_threshold)``.
 
     Raises:
         ValueError: If the selecting run is missing or did not clear the gate.
@@ -1285,7 +1359,7 @@ def _selected_sentence_model(
             v = latest_validation(conn)
             if v is None:
                 raise ValueError("Run validate first.")
-            return v["models"][v["selected"]]["model_name"], band
+            return v["models"][v["selected"]]["model_name"], band, None
         row = conn.execute(
             "SELECT metrics FROM analysis_runs WHERE stage = 'sentence_dev_selection' "
             "ORDER BY run_id DESC LIMIT 1"
@@ -1300,8 +1374,9 @@ def _selected_sentence_model(
             f"Development selection did not reach the gate ({sel['gate']}); no test read."
         )
     chosen = sel["candidates"][sel["selected"]]
-    chosen_band = tuple(chosen["neither_band"]) if chosen["neither_band"] else band
-    return sel["selected"], chosen_band  # type: ignore[return-value]
+    chosen_band = tuple(chosen["neither_band"]) if chosen.get("neither_band") else band
+    model = chosen.get("model_name", sel["selected"])
+    return model, chosen_band, chosen.get("neutral_threshold")  # type: ignore[return-value]
 
 
 def _dispatch(args: argparse.Namespace) -> None:
@@ -1339,18 +1414,22 @@ def _dispatch(args: argparse.Namespace) -> None:
     elif args.cmd == "import-labels":
         logger.info("Wrote %s", import_sentence_labels(args.labeled_csv, args.version))
     elif args.cmd == "dev-select":
-        m = sentence_dev_selection(load_study(args.study), args.dev_version, args.unfreeze)
+        m = sentence_dev_selection(
+            load_study(args.study), args.dev_versions.split(","), args.models.split(","),
+            args.with_threshold, args.with_band, args.unfreeze,
+        )
         logger.info("Dev selection: %s", m)
     elif args.cmd == "audit-metrics":
         study = load_study(args.study)
-        model, band = args.model, SENTENCE_NEITHER_BAND
+        model, band, threshold = args.model, SENTENCE_NEITHER_BAND, args.neutral_threshold
         if args.band:
             low, high = (float(x) for x in args.band.split(","))
             band = (low, high)
         if model is None:
-            model, band = _selected_sentence_model(study, args.version, band)
+            model, band, threshold = _selected_sentence_model(study, args.version, band)
         logger.info("Sentence audit: %s",
-                    sentence_audit_metrics(study, model, args.version, band, args.unfreeze))
+                    sentence_audit_metrics(study, model, args.version, band, args.unfreeze,
+                                           threshold))
     elif args.cmd == "reference-check":
         logger.info("Reference check: %s",
                     reference_sentiment_check(

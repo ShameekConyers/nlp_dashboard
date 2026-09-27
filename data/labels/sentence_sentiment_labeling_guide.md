@@ -1,6 +1,6 @@
 # Sentence sentiment audit: labeling guide
 
-This guide is for the person or model who labels a sentence sentiment audit set. The labels check whether a transformer's sentence-level sentiment scores for aspect sentences can be trusted. Two sets exist: `v1` (100 rows, the first test read) and `v2` (200 rows, the fresh test set for the three-class model; it contains no `v1` sentence). The rules are the same for both.
+This guide is for the person or model who labels a sentence sentiment audit set. The labels check whether a transformer's sentence-level sentiment scores for aspect sentences can be trusted. Three sets exist: `v1` (100 rows, the first test read), `v2` (200 rows, the second test read; it contains no `v1` sentence) and `v3` (200 rows over the five aspects that still had unused test sentences; it contains no `v1` or `v2` sentence). The rules are the same for every set.
 
 ## Input and output
 

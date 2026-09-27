@@ -19,6 +19,7 @@ from src.validation import (
     sentence_class,
     sentence_class3,
     tune_band,
+    tune_neutral_threshold,
     tune_threshold,
 )
 
@@ -189,6 +190,21 @@ def test_three_class_argmax_and_dispatch() -> None:
     assert classify_sentence(0.46, 0.1, band) == "positive"  # positive 0.46 beats negative 0.44
     assert st._binary_pred(0.4, 0.3) is True  # positive 0.4 vs negative 0.3
     assert st._binary_pred(0.4, None) is False
+    # A neutral threshold overrides argmax: neutral 0.3 is not the max but clears a 0.25 cut.
+    assert sentence_class3(0.6, 0.3, 0.25) == "neither"
+    assert sentence_class3(0.6, 0.3, 0.35) == "positive"
+    assert sentence_class3(0.1, 0.3, 0.35) == "negative"
+    assert classify_sentence(0.6, 0.3, band, 0.25) == "neither"
+
+
+def test_tune_neutral_threshold_prefers_best_then_anchor() -> None:
+    y = ["neither", "positive", "negative"]
+    probs = [(0.3, 0.4), (0.7, 0.2), (0.1, 0.3)]
+    t, f1 = tune_neutral_threshold(y, probs, (0.2, 0.35, 0.5), ("positive", "negative", "neither"), 0.5)
+    assert (t, f1) == (0.35, 1.0)  # 0.2 calls every row neither; 0.5 calls none neither
+    t, _ = tune_neutral_threshold(["positive"], [(0.9, 0.05)], (0.2, 0.5, 0.7),
+                                  ("positive", "negative", "neither"), 0.5)
+    assert t == 0.5  # all tie, so the anchor wins
 
 
 def test_tune_band_prefers_best_then_anchor() -> None:

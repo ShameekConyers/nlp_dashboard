@@ -687,9 +687,10 @@ def _render_sentence_sentiment(reliable: Callable[[str], bool], show_unreliable:
     """
     st.subheader("Sentence sentiment of aspect sentences")
     band = sentence_audit.get("neither_band")
+    threshold = sentence_audit.get("neutral_threshold")
     counts = get_aspect_sentence_sentiment(
         conn, sentence_audit["model_name"], sentence_audit["model_revision"],
-        tuple(band) if band else None,
+        tuple(band) if band else None, threshold,
     )
     if not show_unreliable:
         counts = counts[[reliable(a) for a in counts["aspect"]]]
@@ -712,8 +713,13 @@ def _render_sentence_sentiment(reliable: Callable[[str], bool], show_unreliable:
                       margin=dict(t=10))
     st.plotly_chart(fig, width="stretch")
     model = sentence_audit["model_name"]
-    how = ("its argmax over negative, neutral and positive" if band is None
-           else f"neither when its positive probability lies inside {band}")
+    if band is not None:
+        how = f"neither when its positive probability lies inside {band}"
+    elif threshold is not None:
+        how = (f"neither when its neutral probability is at least {threshold}, otherwise "
+               "the larger of positive and negative")
+    else:
+        how = "its argmax over negative, neutral and positive"
     st.caption(
         f"Each tagged sentence is classified by `{model}` ({how}). Audit "
         f"{sentence_audit.get('audit_version', '')}: {sentence_audit['n']} fresh test-split "
@@ -1146,12 +1152,13 @@ def _render_methods() -> None:
                 "test set; see the README for the pre-registered rule."
             )
             st.json({k: _dev[1].get(k) for k in
-                     ("dev_version", "n", "candidates", "selected", "gate", "proceed")})
+                     ("dev_version", "dev_versions", "n", "candidates", "selected", "gate",
+                      "proceed") if k in _dev[1]})
         if sentence_audit:
             st.json({k: sentence_audit.get(k) for k in
                      ("audit_version", "model_name", "n", "label_counts", "classification",
-                      "neither_band", "macro_f1_3class", "binary_n", "binary_macro_f1",
-                      "gate", "passes")})
+                      "neither_band", "neutral_threshold", "macro_f1_3class", "binary_n",
+                      "binary_macro_f1", "gate", "passes")})
         _cov = get_latest_run(conn, "coverage_proxy")
         if _cov:
             st.subheader("Lexicon coverage proxy")
