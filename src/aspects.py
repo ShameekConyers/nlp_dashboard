@@ -259,7 +259,7 @@ def run(study: Study, unfreeze: bool = False) -> int:
 
     Raises:
         ValueError: If the study has no aspect lexicon.
-        FrozenStudyError: If the study is frozen and ``unfreeze`` is False.
+        FrozenStudyError: If a target path belongs to a frozen study and ``unfreeze`` is False.
     """
     if study.aspect_lexicon is None:
         raise ValueError(f"Study {study.name} has no aspect_lexicon.")

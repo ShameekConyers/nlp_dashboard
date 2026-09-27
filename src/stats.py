@@ -749,7 +749,7 @@ def run(study: Study, n_boot: int = N_BOOT, unfreeze: bool = False) -> int:
         The new ``analysis_runs.run_id``.
 
     Raises:
-        FrozenStudyError: If the study is frozen and ``unfreeze`` is False.
+        FrozenStudyError: If a target path belongs to a frozen study and ``unfreeze`` is False.
     """
     guard_writable([study.seed_db], unfreeze)
     from src.aspects import ANY_TURN_STRUCTURE, TURN_STRUCTURE_ASPECTS, audit_paths, load_lexicon
@@ -1159,7 +1159,7 @@ def reference_checks(study: Study, reference_path: Path, unfreeze: bool = False)
         The new ``analysis_runs.run_id``.
 
     Raises:
-        FrozenStudyError: If the study is frozen and ``unfreeze`` is False.
+        FrozenStudyError: If a target path belongs to a frozen study and ``unfreeze`` is False.
     """
     guard_writable([study.seed_db], unfreeze)
     from src.aspects import TURN_STRUCTURE_ASPECTS, load_lexicon, tagged_share
@@ -1292,7 +1292,7 @@ def coverage_proxy(study: Study, unfreeze: bool = False) -> int:
         The new ``analysis_runs.run_id`` (stage ``coverage_proxy``).
 
     Raises:
-        FrozenStudyError: If the study is frozen and ``unfreeze`` is False.
+        FrozenStudyError: If a target path belongs to a frozen study and ``unfreeze`` is False.
     """
     guard_writable([study.seed_db], unfreeze)
     from src.aspects import audit_paths, load_lexicon

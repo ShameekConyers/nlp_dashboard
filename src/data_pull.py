@@ -592,7 +592,7 @@ def pull_study(study: Study, unfreeze: bool = False) -> list[dict[str, Any]]:
         Manifests for the apps that are cached after this run.
 
     Raises:
-        FrozenStudyError: If the study is frozen and ``unfreeze`` is False.
+        FrozenStudyError: If a target path belongs to a frozen study and ``unfreeze`` is False.
     """
     guard_writable([study.raw_dir], unfreeze)
     manifests: list[dict[str, Any]] = []

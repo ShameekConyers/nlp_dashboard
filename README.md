@@ -150,13 +150,13 @@ No passing aspect is a praise finding. No subgroup finding, topic or aspect, rev
 
 ### Interpretation
 
-[USER REVIEWS] Crash and stability complaints separate negative from positive reviews across the turn-structure titles by the widest, most stable margin: roughly one not-recommended review in sixteen sits in the crash topic, against one recommended review in two hundred. RoBERTa scores under one in ten of those reviews positive, while VADER rates them near neutral, which is the lexicon's known blind spot on critical strategy reviews.
+Crash and stability complaints separate negative from positive reviews across the turn-structure titles by the widest, most stable margin: roughly one not-recommended review in sixteen sits in the crash topic, against one recommended review in two hundred. RoBERTa scores under one in ten of those reviews positive, while VADER rates them near neutral, which is the lexicon's known blind spot on critical strategy reviews.
 
-[USER REVIEWS] Players write more critically than they vote. In every cohort a few points fewer reviews read as positive to RoBERTa than recommend the game, and the gap is widest for the anchors, whose recent windows are also the most critical.
+Players write more critically than they vote. In every cohort a few points fewer reviews read as positive to RoBERTa than recommend the game, and the gap is widest for the anchors, whose recent windows are also the most critical.
 
-[USER REVIEWS] Among design themes, pacing (grind, tedium, late-game drag, micromanagement) and the interface are mentioned roughly two to three times as often in negative reviews as in positive ones across the turn-structure titles, and the pattern holds in all three subgroups. Bugs and performance follow the same pattern in the cohort and in two of the three subgroups. The turn-system questions themselves (waiting, initiative, previews) come up in under 3% of kept reviews in each subgroup, too rarely in this sample to separate the subgroups.
+Among design themes, pacing (grind, tedium, late-game drag, micromanagement) and the interface are mentioned roughly two to three times as often in negative reviews as in positive ones across the turn-structure titles, and the pattern holds in all three subgroups. Bugs and performance follow the same pattern in the cohort and in two of the three subgroups. The turn-system questions themselves (waiting, initiative, previews) come up in under 3% of kept reviews in each subgroup, too rarely in this sample to separate the subgroups.
 
-[USER REVIEWS] The subgroup numbers describe these particular games. Genre, franchise and price travel with turn structure, and each subgroup holds 5 to 7 eligible titles, so no difference here is evidence about the turn rule itself.
+The subgroup numbers describe these particular games. Genre, franchise and price travel with turn structure, and each subgroup holds 5 to 7 eligible titles, so no difference here is evidence about the turn rule itself.
 
 ### Limitations
 
@@ -199,7 +199,7 @@ All data comes from the [Steam Reviews API](https://store.steampowered.com/appre
 1. **A third of the reviews were unusable.** 823 of 2,382 reviews failed the sentinel filter (under 10 characters after cleaning, or fewer than 3 real tokens): emoji spam, single-word jokes, ASCII art. The filter caught all of these before they could pollute downstream analysis.
 2. **VADER agrees with the Steam recommendation flag 69.4% of the time.** The remaining third is informative: players routinely recommend a game while writing paragraphs of complaints about specific features, or pan a game they clearly enjoy. The recommendation flag is a noisy ground truth.
 3. **Sentiment skews positive overall** (average compound score of 0.131), consistent with Steam's self-selection bias. Engaged players who bother to write reviews tend to like what they're playing.
-4. **Topic modeling found 3 clusters, two of them non-English.** After the September 2026 label fix (stop words removed from topic labels) and refit, BERTopic assigned all 1,559 kept reviews to one catch-all English cluster (1,513 reviews, labelled "Just / Like / Good / Time"), a Polish cluster (29) and a Russian cluster (17), with no outliers. The pipeline has no language filter for this study, so BERTopic grouped foreign-language reviews by shared vocabulary. [USER REVIEWS] At about 130 kept reviews per game, the English reviews do not separate into stable themes.
+4. **Topic modeling found 3 clusters, two of them non-English.** After the September 2026 label fix (stop words removed from topic labels) and refit, BERTopic assigned all 1,559 kept reviews to one catch-all English cluster (1,513 reviews, labelled "Just / Like / Good / Time"), a Polish cluster (29) and a Russian cluster (17), with no outliers. The pipeline has no language filter for this study, so BERTopic grouped foreign-language reviews by shared vocabulary. At about 130 kept reviews per game, the English reviews do not separate into stable themes.
 
 
 ### Approach
