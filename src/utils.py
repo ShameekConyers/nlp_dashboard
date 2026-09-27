@@ -98,6 +98,12 @@ TRANSFORMER_CANDIDATES: dict[str, str] = {
 }
 """Transformer sentiment candidates (Decision 11): Hugging Face name -> pinned revision."""
 
+SENTENCE_TRANSFORMER_CANDIDATES: dict[str, str] = {
+    "cardiffnlp/twitter-roberta-base-sentiment-latest": "3216a57f2a0d9c45a2e6c20157c20c49fb4bf9c7",
+}
+"""Three-class (negative, neutral, positive) candidates for aspect sentences only
+(plan decision 14). Review-level candidates stay in ``TRANSFORMER_CANDIDATES``."""
+
 TRANSFORMER_POSITIVE_CUTOFF: float = 0.5
 """A transformer scores a text positive when its positive probability is at least this."""
 

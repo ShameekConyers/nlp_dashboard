@@ -2,10 +2,11 @@
 
 Scores kept English reviews (``unit="doc"``) and aspect sentences
 (``unit="sentence"``) with pinned Hugging Face sentiment models and writes
-the positive-class probability to ``sentiment_scores``. Every row carries a
-``model_id`` that joins to the model name and revision in ``sentiment_models``. Long inputs keep their first ``HEAD_TOKENS`` and
-last ``TAIL_TOKENS`` tokens, since strategy reviews often put the verdict at
-the end.
+the positive-class probability to ``sentiment_scores`` (plus the neutral
+probability for a three-class model). Every row carries a ``model_id`` that
+joins to the model name and revision in ``sentiment_models``. Long inputs keep
+their first ``HEAD_TOKENS`` and last ``TAIL_TOKENS`` tokens, since strategy
+reviews often put the verdict at the end.
 
 Validation follows the pre-registered rule. On the market seed's dev split,
 VADER's compound threshold is tuned for balanced accuracy and the candidate
@@ -26,7 +27,7 @@ import random
 import sqlite3
 import sys
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -44,13 +45,22 @@ from src.utils import (
     DATA_DIR,
     HEAD_TOKENS,
     MIN_TOKEN_COUNT,
+    SENTENCE_TRANSFORMER_CANDIDATES,
     TAIL_TOKENS,
     TRANSFORMER_CANDIDATES,
     TRANSFORMER_POSITIVE_CUTOFF,
     VADER_POSITIVE_THRESHOLD,
     get_logger,
 )
-from src.validation import Predictor, bootstrap_validation, macro_f1, macro_f1_multiclass, tune_threshold
+from src.validation import (
+    Predictor,
+    bootstrap_validation,
+    classify_sentence,
+    macro_f1,
+    macro_f1_multiclass,
+    tune_band,
+    tune_threshold,
+)
 
 logger = get_logger(__name__)
 
@@ -66,8 +76,12 @@ WRITE_CHUNK: int = 512
 SHORT_NAMES: dict[str, str] = {
     "siebert/sentiment-roberta-large-english": "roberta_large",
     "distilbert/distilbert-base-uncased-finetuned-sst-2-english": "distilbert_sst2",
+    "cardiffnlp/twitter-roberta-base-sentiment-latest": "roberta_base_3class",
 }
 """Short keys used in metrics JSON."""
+
+ALL_MODELS: dict[str, str] = {**TRANSFORMER_CANDIDATES, **SENTENCE_TRANSFORMER_CANDIDATES}
+"""Every pinned model this module may score: name -> revision."""
 
 VADER_DEFAULT_KEY: str = "vader_0.05"
 VADER_TUNED_KEY: str = "vader_dev_tuned"
@@ -78,8 +92,17 @@ ADOPTION_RULE: str = (
     "the market test split lies above 0 against VADER at 0.05 and at the dev-tuned threshold."
 )
 
+SENTENCE_AUDIT_VERSIONS: dict[str, int] = {"v1": 100, "v2": 200}
+"""Sentence audit sets in order: version -> size. Each later set excludes the
+sentences of every earlier one."""
+
 SENTENCE_AUDIT_VERSION: str = "v1"
-SENTENCE_AUDIT_SIZE: int = 100
+"""The first audit set: the 7.3 test read, re-used as the development set for
+the v2 candidate selection (plan decision 14)."""
+
+SENTENCE_TEST_VERSION: str = "v2"
+"""The fresh test set read once for the three-class gate."""
+
 SENTENCE_AUDIT_SEED: int = 20260927
 SENTENCE_LABELS: tuple[str, ...] = ("positive", "negative", "neither")
 SENTENCE_GATE_MACRO_F1: float = 0.70
@@ -90,6 +113,19 @@ SENTENCE_NEITHER_BAND: tuple[float, float] = (0.2, 0.8)
 positive probability lies strictly inside this band, ``positive`` at or above the
 upper bound and ``negative`` at or below the lower bound. A binary model needs a
 band to predict ``neither`` at all."""
+
+NEITHER_BAND_GRID: tuple[float, ...] = tuple(round(0.05 * i, 2) for i in range(1, 10))
+"""Symmetric bands ``(c, 1 - c)`` tried on the development set for the binary
+candidate: c from 0.05 to 0.45 in steps of 0.05, ties to the c nearest 0.20."""
+
+NEITHER_BAND_ANCHOR: float = SENTENCE_NEITHER_BAND[0]
+
+SELECTION_RULE: str = (
+    "Candidates: each three-class model by argmax over negative, neutral and positive; the "
+    "adopted binary model with a symmetric neither band tuned on the development labels. "
+    "Select the highest development three-class macro-F1, ties to the three-class model. "
+    "Read the fresh test set only if the selected candidate reaches the gate on development."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -125,10 +161,12 @@ def pick_device() -> str:
 
 
 class TransformerScorer:
-    """Positive-class probability from a pinned sequence-classification model.
+    """Class probabilities from a pinned sequence-classification model.
 
-    The model loads on first use. ``score`` sorts inputs by length to batch
-    similar lengths together, then returns results in input order.
+    The model loads on first use. ``score_probs`` sorts inputs by length to
+    batch similar lengths together, then returns results in input order. A
+    binary model yields ``(P(positive), None)``; a model with a ``neutral``
+    head yields ``(P(positive), P(neutral))``.
 
     Attributes:
         model_name: Hugging Face model id.
@@ -155,6 +193,7 @@ class TransformerScorer:
         self._tokenizer: Any = None
         self._model: Any = None
         self._pos_index: int = 1
+        self._neu_index: int | None = None
 
     def _load(self) -> None:
         """Download (or reuse the cache) and load the tokenizer and model."""
@@ -171,6 +210,7 @@ class TransformerScorer:
         self._model = model.to(self.device).eval()
         labels = {v.upper(): int(k) for k, v in model.config.id2label.items()}
         self._pos_index = labels["POSITIVE"]
+        self._neu_index = labels.get("NEUTRAL")
         tok = self._tokenizer
         probe = "A probe sentence."
         plain = tok(probe, add_special_tokens=False)["input_ids"]
@@ -192,14 +232,14 @@ class TransformerScorer:
         ids = tok(text, add_special_tokens=False)["input_ids"]
         return [tok.cls_token_id, *head_tail(ids), tok.sep_token_id]
 
-    def _forward(self, batch: list[list[int]]) -> list[float]:
-        """Run one padded batch and return positive probabilities.
+    def _forward(self, batch: list[list[int]]) -> list[tuple[float, float | None]]:
+        """Run one padded batch and return positive (and neutral) probabilities.
 
         Args:
             batch: Encoded inputs.
 
         Returns:
-            Positive-class probability per input.
+            ``(P(positive), P(neutral) or None)`` per input.
         """
         import torch
 
@@ -207,26 +247,41 @@ class TransformerScorer:
         padded = {k: v.to(self.device) for k, v in padded.items()}
         with torch.inference_mode():
             logits = self._model(**padded).logits
-        probs = torch.softmax(logits.float(), dim=-1)[:, self._pos_index]
-        return probs.cpu().tolist()
+        probs = torch.softmax(logits.float(), dim=-1).cpu()
+        pos = probs[:, self._pos_index].tolist()
+        if self._neu_index is None:
+            return [(float(p), None) for p in pos]
+        neu = probs[:, self._neu_index].tolist()
+        return [(float(p), float(n)) for p, n in zip(pos, neu)]
 
-    def score(self, texts: Sequence[str]) -> list[float]:
+    def score_probs(self, texts: Sequence[str]) -> list[tuple[float, float | None]]:
         """Score texts, batching by length, and return results in input order.
 
         Args:
             texts: Input texts.
 
         Returns:
-            Positive-class probability per text, aligned with ``texts``.
+            ``(P(positive), P(neutral) or None)`` per text, aligned with ``texts``.
         """
         encoded = [self.encode(t) for t in texts]
         order = sorted(range(len(encoded)), key=lambda i: len(encoded[i]), reverse=True)
-        out = [0.0] * len(encoded)
+        out: list[tuple[float, float | None]] = [(0.0, None)] * len(encoded)
         for start in range(0, len(order), self.batch_size):
             chunk = order[start:start + self.batch_size]
-            for i, p in zip(chunk, self._forward([encoded[i] for i in chunk])):
-                out[i] = float(p)
+            for i, pn in zip(chunk, self._forward([encoded[i] for i in chunk])):
+                out[i] = pn
         return out
+
+    def score(self, texts: Sequence[str]) -> list[float]:
+        """Return the positive-class probability per text, in input order.
+
+        Args:
+            texts: Input texts.
+
+        Returns:
+            P(positive) per text, aligned with ``texts``.
+        """
+        return [p for p, _ in self.score_probs(texts)]
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +346,32 @@ def model_scores(
         (model_name, revision, unit),
     ).fetchall()
     return {(d, i): p for d, i, p in rows}
+
+
+def model_class_probs(
+    conn: sqlite3.Connection, model_name: str, revision: str, unit: str
+) -> dict[tuple[int, int], tuple[float, float | None]]:
+    """Return one model's stored positive and neutral probabilities for a unit.
+
+    Args:
+        conn: Connection to a scores database.
+        model_name: Hugging Face model id.
+        revision: Pinned commit hash.
+        unit: ``doc`` or ``sentence``.
+
+    Returns:
+        ``{(document_id, sentence_idx): (positive_prob, neutral_prob or None)}``.
+    """
+    rows = conn.execute(
+        """
+        SELECT s.document_id, s.sentence_idx, s.positive_prob, s.neutral_prob
+        FROM sentiment_scores s
+        JOIN sentiment_models m ON m.model_id = s.model_id
+        WHERE m.model_name = ? AND m.model_revision = ? AND s.unit = ?
+        """,
+        (model_name, revision, unit),
+    ).fetchall()
+    return {(d, i): (p, n) for d, i, p, n in rows}
 
 
 def fetch_doc_inputs(conn: sqlite3.Connection) -> list[tuple[int, int, str]]:
@@ -381,11 +462,11 @@ def score_study(
         t0 = time.perf_counter()
         for start in range(0, len(todo), WRITE_CHUNK):
             chunk = todo[start:start + WRITE_CHUNK]
-            probs = scorer.score([r[2] for r in chunk])
+            probs = scorer.score_probs([r[2] for r in chunk])
             out.executemany(
                 "INSERT OR REPLACE INTO sentiment_scores (document_id, model_id, unit,"
-                " sentence_idx, positive_prob) VALUES (?, ?, ?, ?, ?)",
-                [(r[0], mid, unit, r[1], p) for r, p in zip(chunk, probs)],
+                " sentence_idx, positive_prob, neutral_prob) VALUES (?, ?, ?, ?, ?, ?)",
+                [(r[0], mid, unit, r[1], p, n) for r, (p, n) in zip(chunk, probs)],
             )
             out.commit()
             logger.info("  %d/%d", min(start + WRITE_CHUNK, len(todo)), len(todo))
@@ -621,15 +702,44 @@ def latest_validation(conn: sqlite3.Connection) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 
 
-def sentence_audit_paths() -> tuple[Path, Path]:
-    """Return the unlabeled export and the committed label file paths.
+def sentence_audit_paths(version: str = SENTENCE_AUDIT_VERSION) -> tuple[Path, Path]:
+    """Return the unlabeled export and the committed label file paths of one audit set.
+
+    Args:
+        version: A key of ``SENTENCE_AUDIT_VERSIONS``.
 
     Returns:
         ``(unlabeled_csv, labeled_csv)`` under ``data/labels/``.
     """
     base = DATA_DIR / "labels"
-    return (base / f"sentence_sentiment_audit_{SENTENCE_AUDIT_VERSION}_unlabeled.csv",
-            base / f"sentence_sentiment_audit_{SENTENCE_AUDIT_VERSION}.csv")
+    return (base / f"sentence_sentiment_audit_{version}_unlabeled.csv",
+            base / f"sentence_sentiment_audit_{version}.csv")
+
+
+def load_sentence_labels(version: str) -> list[dict[str, str]]:
+    """Read one committed sentence label file.
+
+    Args:
+        version: A key of ``SENTENCE_AUDIT_VERSIONS``.
+
+    Returns:
+        Rows with ``audit_id``, ``steam_review_id``, ``sentence_idx``, ``aspect``, ``label``.
+    """
+    with open(sentence_audit_paths(version)[1], encoding="utf-8", newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def earlier_versions(version: str) -> list[str]:
+    """Return the audit versions that precede ``version``.
+
+    Args:
+        version: A key of ``SENTENCE_AUDIT_VERSIONS``.
+
+    Returns:
+        Earlier keys in order.
+    """
+    order = list(SENTENCE_AUDIT_VERSIONS)
+    return order[: order.index(version)]
 
 
 def _passing_aspects(study: Study) -> list[str]:
@@ -650,46 +760,110 @@ def _passing_aspects(study: Study) -> list[str]:
     return sorted(a for a, p in precision.items() if p["passes"])
 
 
-def allocate(total: int, strata: Sequence[str]) -> dict[str, int]:
+def allocate(
+    total: int, strata: Sequence[str], capacity: Mapping[str, int] | None = None
+) -> dict[str, int]:
     """Split ``total`` as evenly as possible, extra units to the first strata.
+
+    With ``capacity``, a stratum never gets more than it can supply; its
+    shortfall is spread evenly over the strata that still have room.
 
     Args:
         total: Items to allocate.
         strata: Strata in priority order.
+        capacity: Optional ``{stratum: available items}``.
 
     Returns:
         ``{stratum: count}``.
+
+    Raises:
+        ValueError: If the strata cannot supply ``total`` between them.
     """
-    base, extra = divmod(total, len(strata))
-    return {s: base + (1 if i < extra else 0) for i, s in enumerate(strata)}
+    if capacity is not None:
+        available = sum(capacity.get(s, 0) for s in strata)
+        if available < total:
+            raise ValueError(f"{total} sentences needed, {available} available.")
+    quotas: dict[str, int] = {}
+    open_strata = list(strata)
+    remaining = total
+    while open_strata:
+        base, extra = divmod(remaining, len(open_strata))
+        share = {s: base + (1 if i < extra else 0) for i, s in enumerate(open_strata)}
+        capped = [s for s in open_strata if capacity is not None and share[s] > capacity.get(s, 0)]
+        if not capped:
+            quotas.update(share)
+            break
+        for s in capped:
+            quotas[s] = capacity[s]  # type: ignore[index]
+            remaining -= quotas[s]
+        open_strata = [s for s in open_strata if s not in capped]
+    return quotas
+
+
+def _pick(
+    by_aspect: Mapping[str, Sequence[tuple[str, int, str]]],
+    quotas: Mapping[str, int],
+    used: set[tuple[str, int]],
+    key: Callable[[str], str],
+) -> list[tuple[str, int, str, str]]:
+    """Draw each aspect's quota of unused sentences in a seeded shuffle order.
+
+    Args:
+        by_aspect: ``{aspect: [(steam_review_id, sentence_idx, text), ...]}``.
+        quotas: Sentences per aspect, in draw order.
+        used: ``(steam_review_id, sentence_idx)`` pairs never drawn; grows with the picks.
+        key: Maps an aspect to its shuffle seed.
+
+    Returns:
+        ``(steam_review_id, sentence_idx, aspect, text)`` per pick.
+
+    Raises:
+        ValueError: If an aspect has fewer unused sentences than its quota.
+    """
+    picked: list[tuple[str, int, str, str]] = []
+    for aspect, quota in quotas.items():
+        pool = list(by_aspect.get(aspect, []))
+        random.Random(key(aspect)).shuffle(pool)
+        take = [r for r in pool if (r[0], r[1]) not in used][:quota]
+        if len(take) < quota:
+            raise ValueError(f"{aspect}: {len(take)} test sentences, need {quota}.")
+        used.update((r[0], r[1]) for r in take)
+        picked.extend((r[0], r[1], aspect, r[2]) for r in take)
+    return picked
 
 
 def export_sentence_audit(
-    study: Study, n: int = SENTENCE_AUDIT_SIZE, seed: int = SENTENCE_AUDIT_SEED
+    study: Study,
+    version: str = SENTENCE_TEST_VERSION,
+    n: int | None = None,
+    seed: int = SENTENCE_AUDIT_SEED,
 ) -> Path:
-    """Write the unlabeled sentence-sentiment audit set.
+    """Write the unlabeled sentence-sentiment audit set of one version.
 
-    Draws ``n`` distinct test-split aspect sentences, stratified evenly across
-    aspects that passed the precision audit, each sentence used once. No
-    scores appear in the file.
+    Draws ``n`` distinct test-split aspect sentences, none of them in an
+    earlier version's label file, spread across the aspects that passed the
+    precision audit as evenly as their unused test sentences allow. Each
+    sentence is used once and no scores appear in the file. ``v1`` keeps its
+    original shuffle keys, so its committed export stays reproducible.
 
     Args:
         study: The market study.
-        n: Sentences to draw.
+        version: A key of ``SENTENCE_AUDIT_VERSIONS``.
+        n: Sentences to draw; default the version's size.
         seed: Sampling seed.
 
     Returns:
         Path of the unlabeled CSV.
 
     Raises:
-        ValueError: If an aspect has too few test-split sentences.
+        ValueError: If the passing aspects cannot supply the sentences.
     """
     from src.aspects import load_lexicon
 
     assert study.aspect_lexicon is not None
-    version = load_lexicon(study.aspect_lexicon).version
+    n = SENTENCE_AUDIT_VERSIONS[version] if n is None else n
+    lexicon_version = load_lexicon(study.aspect_lexicon).version
     aspects = _passing_aspects(study)
-    quotas = allocate(n, aspects)
     conn = _read_only(study.seed_db)
     try:
         rows = conn.execute(
@@ -702,26 +876,25 @@ def export_sentence_audit(
             WHERE a.lexicon_version = ?
             ORDER BY d.steam_review_id, a.aspect, a.sentence_idx
             """,
-            (version,),
+            (lexicon_version,),
         ).fetchall()
     finally:
         conn.close()
+    used: set[tuple[str, int]] = {
+        (r["steam_review_id"], int(r["sentence_idx"]))
+        for v in earlier_versions(version) for r in load_sentence_labels(v)
+    }
     by_aspect: dict[str, list[tuple[str, int, str]]] = {}
     for rid, aspect, idx, _doc, text in rows:
-        if aspect in quotas and dev_test_split(rid) == "test":
+        if aspect in aspects and dev_test_split(rid) == "test":
             by_aspect.setdefault(aspect, []).append((rid, idx, text))
-    used: set[tuple[str, int]] = set()
-    picked: list[tuple[str, int, str, str]] = []
-    for aspect in aspects:
-        pool = by_aspect.get(aspect, [])
-        random.Random(f"{seed}:{aspect}").shuffle(pool)
-        take = [r for r in pool if (r[0], r[1]) not in used][: quotas[aspect]]
-        if len(take) < quotas[aspect]:
-            raise ValueError(f"{aspect}: {len(take)} test sentences, need {quotas[aspect]}.")
-        used.update((r[0], r[1]) for r in take)
-        picked.extend((r[0], r[1], aspect, r[2]) for r in take)
-    random.Random(seed).shuffle(picked)
-    out, _ = sentence_audit_paths()
+    capacity = {a: sum(1 for r in by_aspect.get(a, []) if (r[0], r[1]) not in used)
+                for a in aspects}
+    quotas = allocate(n, aspects, capacity)
+    tag = "" if version == SENTENCE_AUDIT_VERSION else f":{version}"
+    picked = _pick(by_aspect, quotas, used, lambda a: f"{seed}{tag}:{a}")
+    random.Random(f"{seed}{tag}" if tag else seed).shuffle(picked)
+    out, _ = sentence_audit_paths(version)
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w", encoding="utf-8", newline="") as f:
         w = csv.writer(f)
@@ -732,7 +905,7 @@ def export_sentence_audit(
     return out
 
 
-def import_sentence_labels(labeled_csv: Path) -> Path:
+def import_sentence_labels(labeled_csv: Path, version: str = SENTENCE_TEST_VERSION) -> Path:
     """Validate a labeled audit file and write the committed label file.
 
     The committed file keeps ids, aspect and label; sentence text stays in
@@ -740,6 +913,7 @@ def import_sentence_labels(labeled_csv: Path) -> Path:
 
     Args:
         labeled_csv: The labeler's filled copy of the export.
+        version: A key of ``SENTENCE_AUDIT_VERSIONS``.
 
     Returns:
         Path of the committed label file.
@@ -747,7 +921,7 @@ def import_sentence_labels(labeled_csv: Path) -> Path:
     Raises:
         ValueError: If ids differ from the export or a label is invalid.
     """
-    unlabeled, committed = sentence_audit_paths()
+    unlabeled, committed = sentence_audit_paths(version)
     with open(unlabeled, encoding="utf-8", newline="") as f:
         expected = {r["audit_id"]: r for r in csv.DictReader(f)}
     with open(labeled_csv, encoding="utf-8", newline="") as f:
@@ -769,29 +943,154 @@ def import_sentence_labels(labeled_csv: Path) -> Path:
     return committed
 
 
-def sentence_class(prob: float, band: tuple[float, float] = SENTENCE_NEITHER_BAND) -> str:
-    """Map a positive probability to positive, negative or neither.
+def _audit_predictions(
+    study: Study,
+    labels: Sequence[Mapping[str, str]],
+    model_name: str,
+    band: tuple[float, float],
+) -> tuple[list[str], list[str], list[tuple[float, float | None]]]:
+    """Return labels, predicted classes and stored probabilities for audit rows.
+
+    A three-class model is classified by argmax, a binary one by ``band``.
 
     Args:
-        prob: Positive-class probability.
-        band: ``(low, high)``; strictly inside is ``neither``.
+        study: The market study; its scores database is opened read-only.
+        labels: Rows of a committed label file.
+        model_name: Hugging Face id of a scored model.
+        band: Neither band for a binary model.
 
     Returns:
-        The class name.
+        ``(y_true, y_pred, [(positive_prob, neutral_prob or None), ...])``.
     """
-    if prob >= band[1]:
-        return "positive"
-    if prob <= band[0]:
-        return "negative"
-    return "neither"
+    conn = _read_only(study.scores_path)
+    try:
+        ids = dict(conn.execute("SELECT steam_review_id, id FROM documents").fetchall())
+        stored = model_class_probs(conn, model_name, ALL_MODELS[model_name], "sentence")
+    finally:
+        conn.close()
+    y_true = [r["label"] for r in labels]
+    probs = [stored[(ids[r["steam_review_id"]], int(r["sentence_idx"]))] for r in labels]
+    y_pred = [classify_sentence(p, n, band) for p, n in probs]
+    return y_true, y_pred, probs
 
 
-def sentence_audit_metrics(study: Study, model_name: str, unfreeze: bool = False) -> dict[str, Any]:
-    """Score the committed sentence labels against one model's sentence scores.
+def _binary_pred(positive: float, neutral: float | None) -> bool:
+    """Return the positive-versus-negative call, ignoring the neutral head.
+
+    Args:
+        positive: P(positive).
+        neutral: P(neutral) or None for a binary model.
+
+    Returns:
+        True when positive beats negative.
+    """
+    if neutral is None:
+        return positive >= POSITIVE_CUTOFF
+    return positive >= 1.0 - positive - neutral
+
+
+def _store_run(study: Study, stage: str, params: dict[str, Any], metrics: dict[str, Any]) -> None:
+    """Append one ``analysis_runs`` row to the study's scores database.
+
+    Args:
+        study: The study.
+        stage: Run stage name.
+        params: Run parameters.
+        metrics: Run metrics.
+    """
+    conn = sqlite3.connect(study.scores_path)
+    try:
+        conn.execute(
+            "INSERT INTO analysis_runs (stage, params, git_sha, metrics) VALUES (?, ?, ?, ?)",
+            (stage, json.dumps(params), _git_sha(), json.dumps(metrics, default=_json_default)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def sentence_dev_selection(
+    study: Study, dev_version: str = SENTENCE_AUDIT_VERSION, unfreeze: bool = False
+) -> dict[str, Any]:
+    """Select the sentence-sentiment candidate on the development labels (plan decision 14).
+
+    Every three-class candidate is classified by argmax. The adopted binary
+    model gets a symmetric neither band tuned on the same labels. The
+    candidate with the highest development macro-F1 is selected, ties to a
+    three-class model, and ``proceed`` says whether it reaches the gate, which
+    is the condition for reading the fresh test set.
+
+    Args:
+        study: The market study.
+        dev_version: Label set used for selection and calibration.
+        unfreeze: Allow writing a frozen (shipped) study's scores database.
+
+    Returns:
+        The metrics dictionary, also stored as a ``sentence_dev_selection`` run.
+
+    Raises:
+        FrozenStudyError: If a target belongs to a frozen study and ``unfreeze``
+            is False.
+        ValueError: If no transformer was adopted for the study.
+    """
+    guard_writable([study.scores_path], unfreeze)
+    labels = load_sentence_labels(dev_version)
+    y_true = [r["label"] for r in labels]
+    conn = _read_only(study.scores_path)
+    try:
+        validation = latest_validation(conn)
+    finally:
+        conn.close()
+    if validation is None or not validation["adopted"]:
+        raise ValueError(f"{study.name}: no adopted transformer; run validate first.")
+    binary_name = validation["models"][validation["selected"]]["model_name"]
+    candidates: dict[str, dict[str, Any]] = {}
+    for name in SENTENCE_TRANSFORMER_CANDIDATES:
+        _, y_pred, _ = _audit_predictions(study, labels, name, SENTENCE_NEITHER_BAND)
+        candidates[name] = {
+            "classification": "argmax", "neither_band": None,
+            "macro_f1_3class": macro_f1_multiclass(y_true, y_pred, SENTENCE_LABELS),
+        }
+    _, fixed_pred, probs = _audit_predictions(study, labels, binary_name, SENTENCE_NEITHER_BAND)
+    band, band_f1 = tune_band([*y_true], [p for p, _ in probs], NEITHER_BAND_GRID,
+                              SENTENCE_LABELS, NEITHER_BAND_ANCHOR)
+    candidates[binary_name] = {
+        "classification": "band", "neither_band": list(band), "macro_f1_3class": band_f1,
+        "fixed_band": list(SENTENCE_NEITHER_BAND),
+        "fixed_band_macro_f1": macro_f1_multiclass(y_true, fixed_pred, SENTENCE_LABELS),
+    }
+    order = [*SENTENCE_TRANSFORMER_CANDIDATES, binary_name]
+    selected = max(order, key=lambda k: (candidates[k]["macro_f1_3class"], -order.index(k)))
+    metrics = {
+        "selection_rule": SELECTION_RULE,
+        "dev_version": dev_version, "n": len(labels),
+        "label_counts": {c: y_true.count(c) for c in SENTENCE_LABELS},
+        "band_grid": list(NEITHER_BAND_GRID),
+        "candidates": candidates,
+        "selected": selected,
+        "selected_revision": ALL_MODELS[selected],
+        "gate": SENTENCE_GATE_MACRO_F1,
+        "proceed": candidates[selected]["macro_f1_3class"] >= SENTENCE_GATE_MACRO_F1,
+    }
+    _store_run(study, "sentence_dev_selection",
+               {"study": study.name, "labels": sentence_audit_paths(dev_version)[1].name}, metrics)
+    return metrics
+
+
+def sentence_audit_metrics(
+    study: Study,
+    model_name: str,
+    version: str = SENTENCE_AUDIT_VERSION,
+    band: tuple[float, float] = SENTENCE_NEITHER_BAND,
+    unfreeze: bool = False,
+) -> dict[str, Any]:
+    """Score one version's committed sentence labels against one model's sentence scores.
 
     Args:
         study: The market study.
         model_name: Hugging Face id of the scored model.
+        version: A key of ``SENTENCE_AUDIT_VERSIONS``.
+        band: Neither band for a binary model; ignored for a three-class model.
         unfreeze: Allow writing a frozen (shipped) study's scores database.
 
     Returns:
@@ -804,43 +1103,32 @@ def sentence_audit_metrics(study: Study, model_name: str, unfreeze: bool = False
             is False.
     """
     guard_writable([study.scores_path], unfreeze)
-    _, committed = sentence_audit_paths()
-    with open(committed, encoding="utf-8", newline="") as f:
-        labels = list(csv.DictReader(f))
-    conn = sqlite3.connect(study.scores_path)
-    try:
-        ids = dict(conn.execute("SELECT steam_review_id, id FROM documents").fetchall())
-        revision = TRANSFORMER_CANDIDATES[model_name]
-        prob = model_scores(conn, model_name, revision, "sentence")
-        y_true = [r["label"] for r in labels]
-        probs = [prob[(ids[r["steam_review_id"]], int(r["sentence_idx"]))] for r in labels]
-        y_pred = [sentence_class(p) for p in probs]
-        binary = [(t == "positive", p >= POSITIVE_CUTOFF) for t, p in zip(y_true, probs)
-                  if t != "neither"]
-        confusion = {t: {p: sum(1 for a, b in zip(y_true, y_pred) if a == t and b == p)
-                         for p in SENTENCE_LABELS} for t in SENTENCE_LABELS}
-        f1 = macro_f1_multiclass(y_true, y_pred, SENTENCE_LABELS)
-        metrics = {
-            "model_name": model_name, "model_revision": revision, "n": len(labels),
-            "label_counts": {c: y_true.count(c) for c in SENTENCE_LABELS},
-            "neither_band": list(SENTENCE_NEITHER_BAND),
-            "macro_f1_3class": f1,
-            "binary_n": len(binary),
-            "binary_macro_f1": macro_f1([b[0] for b in binary], [b[1] for b in binary])
-            if binary else None,
-            "confusion": confusion,
-            "gate": SENTENCE_GATE_MACRO_F1,
-            "passes": f1 >= SENTENCE_GATE_MACRO_F1,
-        }
-        conn.execute(
-            "INSERT INTO analysis_runs (stage, params, git_sha, metrics) VALUES (?, ?, ?, ?)",
-            ("sentence_audit", json.dumps({"study": study.name, "labels": committed.name}),
-             _git_sha(), json.dumps(metrics)),
-        )
-        conn.commit()
-        return metrics
-    finally:
-        conn.close()
+    labels = load_sentence_labels(version)
+    y_true, y_pred, probs = _audit_predictions(study, labels, model_name, band)
+    three_class = bool(probs) and probs[0][1] is not None
+    binary = [(t == "positive", _binary_pred(p, n)) for t, (p, n) in zip(y_true, probs)
+              if t != "neither"]
+    confusion = {t: {p: sum(1 for a, b in zip(y_true, y_pred) if a == t and b == p)
+                     for p in SENTENCE_LABELS} for t in SENTENCE_LABELS}
+    f1 = macro_f1_multiclass(y_true, y_pred, SENTENCE_LABELS)
+    metrics = {
+        "audit_version": version,
+        "model_name": model_name, "model_revision": ALL_MODELS[model_name], "n": len(labels),
+        "label_counts": {c: y_true.count(c) for c in SENTENCE_LABELS},
+        "classification": "argmax" if three_class else "band",
+        "neither_band": None if three_class else list(band),
+        "macro_f1_3class": f1,
+        "binary_n": len(binary),
+        "binary_macro_f1": macro_f1([b[0] for b in binary], [b[1] for b in binary])
+        if binary else None,
+        "confusion": confusion,
+        "gate": SENTENCE_GATE_MACRO_F1,
+        "passes": f1 >= SENTENCE_GATE_MACRO_F1,
+    }
+    _store_run(study, "sentence_audit",
+               {"study": study.name, "labels": sentence_audit_paths(version)[1].name,
+                "audit_version": version}, metrics)
+    return metrics
 
 
 # ---------------------------------------------------------------------------
@@ -925,13 +1213,15 @@ def reference_sentiment_check(
 
 def main() -> None:
     """CLI entry point with subcommands score, validate, export-audit, import-labels,
-    audit-metrics and reference-check."""
+    dev-select, audit-metrics and reference-check."""
     parser = argparse.ArgumentParser(description="Transformer sentiment scoring and validation.")
     sub = parser.add_subparsers(dest="cmd", required=True)
+    versions = list(SENTENCE_AUDIT_VERSIONS)
     p = sub.add_parser("score", help="Score kept reviews and aspect sentences.")
     p.add_argument("--study", type=Path, required=True)
     p.add_argument("--units", default="doc,sentence")
-    p.add_argument("--models", default="all", help="Comma-separated model ids, or all.")
+    p.add_argument("--models", default="all",
+                   help="Comma-separated model ids, or all (the review-level candidates).")
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument(UNFREEZE_FLAG, dest="unfreeze", action="store_true", help=UNFREEZE_HELP)
     p = sub.add_parser("validate", help="Decision 11 selection, test read and verdict.")
@@ -939,13 +1229,23 @@ def main() -> None:
     p.add_argument("--april", type=Path, required=True)
     p.add_argument("--n-boot", type=int, default=N_BOOT)
     p.add_argument(UNFREEZE_FLAG, dest="unfreeze", action="store_true", help=UNFREEZE_HELP)
-    p = sub.add_parser("export-audit", help="Write the unlabeled sentence audit set.")
+    p = sub.add_parser("export-audit", help="Write an unlabeled sentence audit set.")
     p.add_argument("--study", type=Path, required=True)
+    p.add_argument("--version", choices=versions, default=SENTENCE_TEST_VERSION)
     p = sub.add_parser("import-labels", help="Validate and commit sentence audit labels.")
     p.add_argument("labeled_csv", type=Path)
-    p = sub.add_parser("audit-metrics", help="Score the sentence audit.")
+    p.add_argument("--version", choices=versions, default=SENTENCE_TEST_VERSION)
+    p = sub.add_parser("dev-select", help="Select the sentence candidate on development labels.")
     p.add_argument("--study", type=Path, required=True)
-    p.add_argument("--model", default=None, help="Model id; default the selected candidate.")
+    p.add_argument("--dev-version", choices=versions, default=SENTENCE_AUDIT_VERSION)
+    p.add_argument(UNFREEZE_FLAG, dest="unfreeze", action="store_true", help=UNFREEZE_HELP)
+    p = sub.add_parser("audit-metrics", help="Score one sentence audit set (the test read).")
+    p.add_argument("--study", type=Path, required=True)
+    p.add_argument("--version", choices=versions, default=SENTENCE_TEST_VERSION)
+    p.add_argument("--model", default=None,
+                   help="Model id; default the model selected for the version (validate for "
+                        "v1, dev-select for later versions).")
+    p.add_argument("--band", default=None, help="Neither band low,high for a binary model.")
     p.add_argument(UNFREEZE_FLAG, dest="unfreeze", action="store_true", help=UNFREEZE_HELP)
     p = sub.add_parser("reference-check", help="Decision 14 sentence-sentiment check.")
     p.add_argument("--study", type=Path, required=True)
@@ -957,6 +1257,51 @@ def main() -> None:
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         sys.exit(2)
+
+
+def _selected_sentence_model(
+    study: Study, version: str, band: tuple[float, float]
+) -> tuple[str, tuple[float, float]]:
+    """Return the model and band the pre-registration selected for an audit version.
+
+    ``v1`` uses the Decision 11 adopted model with the fixed band. Later
+    versions use the newest ``sentence_dev_selection`` run, which must have
+    reached the gate on development.
+
+    Args:
+        study: The market study.
+        version: A key of ``SENTENCE_AUDIT_VERSIONS``.
+        band: Fallback band for a binary model.
+
+    Returns:
+        ``(model_name, band)``.
+
+    Raises:
+        ValueError: If the selecting run is missing or did not clear the gate.
+    """
+    conn = _read_only(study.scores_path)
+    try:
+        if version == SENTENCE_AUDIT_VERSION:
+            v = latest_validation(conn)
+            if v is None:
+                raise ValueError("Run validate first.")
+            return v["models"][v["selected"]]["model_name"], band
+        row = conn.execute(
+            "SELECT metrics FROM analysis_runs WHERE stage = 'sentence_dev_selection' "
+            "ORDER BY run_id DESC LIMIT 1"
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        raise ValueError("Run dev-select first.")
+    sel = json.loads(row[0])
+    if not sel["proceed"]:
+        raise ValueError(
+            f"Development selection did not reach the gate ({sel['gate']}); no test read."
+        )
+    chosen = sel["candidates"][sel["selected"]]
+    chosen_band = tuple(chosen["neither_band"]) if chosen["neither_band"] else band
+    return sel["selected"], chosen_band  # type: ignore[return-value]
 
 
 def _dispatch(args: argparse.Namespace) -> None:
@@ -976,7 +1321,9 @@ def _dispatch(args: argparse.Namespace) -> None:
 
             version = load_lexicon(study.aspect_lexicon).version
         for name in names:
-            scorer = TransformerScorer(name, TRANSFORMER_CANDIDATES[name], args.batch_size)
+            if name not in ALL_MODELS:
+                raise ValueError(f"Unknown model {name!r}; known: {', '.join(ALL_MODELS)}.")
+            scorer = TransformerScorer(name, ALL_MODELS[name], args.batch_size)
             for unit in args.units.split(","):
                 if unit == "sentence" and version is None:
                     continue
@@ -988,21 +1335,22 @@ def _dispatch(args: argparse.Namespace) -> None:
         )
         logger.info("Selected %s, adopted %s", m["selected"], m["adopted"])
     elif args.cmd == "export-audit":
-        export_sentence_audit(load_study(args.study))
+        export_sentence_audit(load_study(args.study), args.version)
     elif args.cmd == "import-labels":
-        logger.info("Wrote %s", import_sentence_labels(args.labeled_csv))
+        logger.info("Wrote %s", import_sentence_labels(args.labeled_csv, args.version))
+    elif args.cmd == "dev-select":
+        m = sentence_dev_selection(load_study(args.study), args.dev_version, args.unfreeze)
+        logger.info("Dev selection: %s", m)
     elif args.cmd == "audit-metrics":
         study = load_study(args.study)
-        model = args.model
+        model, band = args.model, SENTENCE_NEITHER_BAND
+        if args.band:
+            low, high = (float(x) for x in args.band.split(","))
+            band = (low, high)
         if model is None:
-            conn = _read_only(study.scores_path)
-            try:
-                v = latest_validation(conn)
-            finally:
-                conn.close()
-            assert v is not None, "Run validate first."
-            model = v["models"][v["selected"]]["model_name"]
-        logger.info("Sentence audit: %s", sentence_audit_metrics(study, model, args.unfreeze))
+            model, band = _selected_sentence_model(study, args.version, band)
+        logger.info("Sentence audit: %s",
+                    sentence_audit_metrics(study, model, args.version, band, args.unfreeze))
     elif args.cmd == "reference-check":
         logger.info("Reference check: %s",
                     reference_sentiment_check(

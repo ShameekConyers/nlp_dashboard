@@ -14,6 +14,7 @@ change the default study.
 import os
 import sqlite3
 import sys
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -31,6 +32,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from dashboard.queries import (  # noqa: E402
     get_aspect_examples,
+    get_aspect_sentence_sentiment,
     get_cohort_options,
     get_cohort_stats,
     get_filter_options,
@@ -673,6 +675,66 @@ def _open_aspect_in_explorer(aspect: str) -> None:
     st.session_state["view"] = "Review Explorer"
 
 
+def _render_sentence_sentiment(reliable: Callable[[str], bool], show_unreliable: bool) -> None:
+    """Show sentence-level sentiment of aspect sentences from the audited model.
+
+    Rendered only when the newest sentence audit passed its gate. Shares are
+    pooled over every tagged sentence in the study and are descriptive.
+
+    Args:
+        reliable: Whether an aspect passed its precision audit.
+        show_unreliable: Include aspects without a passing audit.
+    """
+    st.subheader("Sentence sentiment of aspect sentences")
+    band = sentence_audit.get("neither_band")
+    counts = get_aspect_sentence_sentiment(
+        conn, sentence_audit["model_name"], sentence_audit["model_revision"],
+        tuple(band) if band else None,
+    )
+    if not show_unreliable:
+        counts = counts[[reliable(a) for a in counts["aspect"]]]
+    if counts.empty:
+        st.info("No sentence scores for the shown aspects.")
+        return
+    classes = ["negative", "neither", "positive"]
+    pooled = counts.groupby("aspect")[[*classes, "n"]].sum().reset_index()
+    pooled["Aspect"] = [_theme_label("aspect", a) for a in pooled["aspect"]]
+    long = pooled.melt(id_vars=["Aspect", "n"], value_vars=classes, var_name="Class",
+                       value_name="count")
+    long["share"] = long["count"] / long["n"]
+    fig = px.bar(long, x="share", y="Aspect", color="Class", orientation="h",
+                 category_orders={"Class": classes},
+                 color_discrete_map={"negative": "#c0392b", "neither": "#95a5a6",
+                                     "positive": "#27ae60"},
+                 hover_data={"count": True, "n": True, "share": ":.1%"})
+    fig.update_layout(height=max(300, 32 * pooled["Aspect"].nunique()), barmode="stack",
+                      xaxis_tickformat=".0%", xaxis_title="Share of tagged sentences",
+                      margin=dict(t=10))
+    st.plotly_chart(fig, width="stretch")
+    model = sentence_audit["model_name"]
+    how = ("its argmax over negative, neutral and positive" if band is None
+           else f"neither when its positive probability lies inside {band}")
+    st.caption(
+        f"Each tagged sentence is classified by `{model}` ({how}). Audit "
+        f"{sentence_audit.get('audit_version', '')}: {sentence_audit['n']} fresh test-split "
+        f"sentences labelled by an independent model labeler, three-class macro-F1 "
+        f"{sentence_audit['macro_f1_3class']:.2f} against a {sentence_audit['gate']:.2f} gate "
+        "fixed before labelling. Shares pool every tagged sentence in the study, weight games by "
+        "their sentence counts, and are descriptive: the findings above rest on the recommend "
+        "flag, not on these scores."
+    )
+    with st.expander("Per game"):
+        table = counts.copy()
+        for c in classes:
+            table[c] = table[c] / table["n"]
+        table["Aspect"] = [_theme_label("aspect", a) for a in table["aspect"]]
+        st.dataframe(
+            table[["Aspect", "app_name", "n", *classes]].rename(columns={"app_name": "Game"}),
+            width="stretch", hide_index=True,
+            column_config={c: st.column_config.NumberColumn(format="%.1%") for c in classes},
+        )
+
+
 def _render_design_themes() -> None:
     """Render the audited phrase-lexicon lens for design questions."""
     st.header("Design Themes")
@@ -751,12 +813,15 @@ def _render_design_themes() -> None:
     if has_model:
         st.caption("model_pos_share: share of the aspect's reviews (whole review) that "
                    "RoBERTa scores positive. " + VADER_CAVEAT)
-    if sentence_audit and not sentence_audit.get("passes"):
+    if sentence_audit and sentence_audit.get("passes"):
+        _render_sentence_sentiment(reliable, show_unreliable)
+    elif sentence_audit:
         st.info(
-            "Sentence-level sentiment for aspect sentences is stored but not shown: on a "
-            f"{sentence_audit['n']}-sentence audit its three-class macro-F1 is "
-            f"{sentence_audit['macro_f1_3class']:.2f}, below the "
-            f"{sentence_audit['gate']:.2f} gate set before labelling."
+            "Sentence-level sentiment for aspect sentences is stored but not shown: "
+            f"`{sentence_audit['model_name']}` scores a three-class macro-F1 of "
+            f"{sentence_audit['macro_f1_3class']:.2f} on the "
+            f"{sentence_audit['n']}-sentence audit {sentence_audit.get('audit_version', '')}, "
+            f"below the {sentence_audit['gate']:.2f} gate set before labelling."
         )
 
     _render_top_themes("aspect")
@@ -1073,10 +1138,20 @@ def _render_methods() -> None:
             "test split (Decision 11). Long reviews keep their first 256 and last 254 tokens. "
             "Only document-level scores feed the sentiment columns."
         )
+        _dev = get_latest_run(conn, "sentence_dev_selection")
+        if _dev:
+            st.markdown(
+                "Sentence-level candidates were selected on the first audit set (now the "
+                "development labels) and the selected model was read once against a fresh "
+                "test set; see the README for the pre-registered rule."
+            )
+            st.json({k: _dev[1].get(k) for k in
+                     ("dev_version", "n", "candidates", "selected", "gate", "proceed")})
         if sentence_audit:
-            st.json({k: sentence_audit[k] for k in
-                     ("n", "label_counts", "neither_band", "macro_f1_3class", "binary_n",
-                      "binary_macro_f1", "gate", "passes")})
+            st.json({k: sentence_audit.get(k) for k in
+                     ("audit_version", "model_name", "n", "label_counts", "classification",
+                      "neither_band", "macro_f1_3class", "binary_n", "binary_macro_f1",
+                      "gate", "passes")})
         _cov = get_latest_run(conn, "coverage_proxy")
         if _cov:
             st.subheader("Lexicon coverage proxy")

@@ -7,14 +7,18 @@ import numpy as np
 import pytest
 
 from src import sentiment_transformer as st
-from src.db_setup import create_study_tables
+from src.db_setup import create_scores_tables, create_study_tables
 from src.study import load_study
 from src.validation import (
     Predictor,
     bootstrap_validation,
+    classify_sentence,
     macro_f1,
     macro_f1_multiclass,
     roc_auc,
+    sentence_class,
+    sentence_class3,
+    tune_band,
     tune_threshold,
 )
 
@@ -85,9 +89,11 @@ def test_scorer_output_aligns_with_input_order(monkeypatch: pytest.MonkeyPatch) 
     scorer = st.TransformerScorer("fake/model", "rev", batch_size=2)
     monkeypatch.setattr(scorer, "_load", lambda: None)
     monkeypatch.setattr(scorer, "encode", lambda text: [0] * len(text))
-    monkeypatch.setattr(scorer, "_forward", lambda batch: [len(ids) / 100 for ids in batch])
+    monkeypatch.setattr(scorer, "_forward",
+                        lambda batch: [(len(ids) / 100, None) for ids in batch])
     texts = ["aaaa", "a", "aaaaaaa", "aa", "aaaaa"]
     assert scorer.score(texts) == [len(t) / 100 for t in texts]
+    assert scorer.score_probs(texts) == [(len(t) / 100, None) for t in texts]
 
 
 def test_constructing_a_scorer_loads_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -115,7 +121,7 @@ def test_score_study_stores_model_and_revision_and_resumes(
     conn.close()
 
     scorer = st.TransformerScorer("fake/model", "rev1")
-    monkeypatch.setattr(scorer, "score", lambda texts: [0.25] * len(texts))
+    monkeypatch.setattr(scorer, "score_probs", lambda texts: [(0.25, None)] * len(texts))
     first = st.score_study(study, scorer, "doc")
     second = st.score_study(study, scorer, "doc")
     assert (first["n_scored"], second["n_scored"]) == (2, 0)
@@ -130,17 +136,78 @@ def test_score_study_stores_model_and_revision_and_resumes(
     assert n_models == 1  # every score row joins to one stored name and revision
 
     rescored = st.TransformerScorer("fake/model", "rev2")
-    monkeypatch.setattr(rescored, "score", lambda texts: [0.75] * len(texts))
+    monkeypatch.setattr(rescored, "score_probs", lambda texts: [(0.75, 0.15)] * len(texts))
     assert st.score_study(study, rescored, "doc")["n_scored"] == 2
     conn = sqlite3.connect(study.seed_db)
     assert st.model_scores(conn, "fake/model", "rev2", "doc") == {(1, -1): 0.75, (3, -1): 0.75}
+    # A three-class scorer stores its neutral probability; a binary one stores NULL.
+    assert st.model_class_probs(conn, "fake/model", "rev2", "doc") == {
+        (1, -1): (0.75, 0.15), (3, -1): (0.75, 0.15)
+    }
+    assert st.model_class_probs(conn, "fake/model", "rev1", "doc")[(1, -1)] == (0.25, None)
     conn.close()
 
 
+def test_create_scores_tables_adds_neutral_prob_to_an_older_table() -> None:
+    db = sqlite3.connect(":memory:")
+    db.execute(
+        "CREATE TABLE sentiment_scores (document_id INTEGER NOT NULL, model_id INTEGER NOT NULL,"
+        " unit TEXT NOT NULL, sentence_idx INTEGER NOT NULL, positive_prob REAL NOT NULL,"
+        " PRIMARY KEY (document_id, model_id, unit, sentence_idx)) WITHOUT ROWID"
+    )
+    db.execute("INSERT INTO sentiment_scores VALUES (1, 1, 'doc', -1, 0.9)")
+    create_scores_tables(db)
+    create_scores_tables(db)  # idempotent
+    assert db.execute("SELECT positive_prob, neutral_prob FROM sentiment_scores").fetchall() == [
+        (0.9, None)
+    ]
+
+
 def test_sentence_class_band_and_allocation() -> None:
-    assert [st.sentence_class(p) for p in (0.9, 0.8, 0.5, 0.2, 0.1)] == [
+    band = st.SENTENCE_NEITHER_BAND
+    assert [sentence_class(p, band) for p in (0.9, 0.8, 0.5, 0.2, 0.1)] == [
         "positive", "positive", "neither", "negative", "negative"
     ]
     assert st.allocate(100, ["a", "b", "c", "d", "e", "f", "g"]) == {
         "a": 15, "b": 15, "c": 14, "d": 14, "e": 14, "f": 14, "g": 14
     }
+    # Short strata give all they have; the shortfall is spread over the others.
+    capacity = {"a": 4, "b": 26, "c": 100, "d": 100, "e": 100, "f": 100, "g": 100}
+    assert st.allocate(200, ["a", "b", "c", "d", "e", "f", "g"], capacity) == {
+        "a": 4, "b": 26, "c": 34, "d": 34, "e": 34, "f": 34, "g": 34
+    }
+    with pytest.raises(ValueError, match="available"):
+        st.allocate(10, ["a", "b"], {"a": 4, "b": 5})
+
+
+def test_three_class_argmax_and_dispatch() -> None:
+    assert sentence_class3(0.2, 0.5) == "neither"
+    assert sentence_class3(0.6, 0.3) == "positive"
+    assert sentence_class3(0.1, 0.2) == "negative"
+    band = st.SENTENCE_NEITHER_BAND
+    assert classify_sentence(0.5, None, band) == "neither"
+    assert classify_sentence(0.46, 0.1, band) == "positive"  # positive 0.46 beats negative 0.44
+    assert st._binary_pred(0.4, 0.3) is True  # positive 0.4 vs negative 0.3
+    assert st._binary_pred(0.4, None) is False
+
+
+def test_tune_band_prefers_best_then_anchor() -> None:
+    y = ["positive", "negative", "neither", "negative"]
+    probs = [0.95, 0.05, 0.5, 0.3]  # only the narrow band calls 0.3 negative
+    band, f1 = tune_band(y, probs, (0.05, 0.2, 0.45), ("positive", "negative", "neither"), 0.2)
+    assert band == (0.45, 0.55) and f1 == 1.0
+    # Every band scores the same here, so the tie goes to c nearest the anchor 0.2.
+    band, _ = tune_band(["positive", "negative"], [0.99, 0.01], (0.05, 0.2, 0.45),
+                        ("positive", "negative", "neither"), 0.2)
+    assert band == (0.2, 0.8)
+
+
+def test_pick_skips_used_sentences_and_fills_quotas() -> None:
+    pool = {"a": [("r1", 0, "x"), ("r2", 0, "y"), ("r3", 0, "z")], "b": [("r1", 0, "x"), ("r9", 1, "w")]}
+    used = {("r1", 0)}
+    picked = st._pick(pool, {"a": 2, "b": 1}, used, lambda a: f"k:{a}")
+    assert len(picked) == 3
+    assert ("r1", 0) not in {(r, i) for r, i, _, _ in picked}
+    assert [p[2] for p in picked] == ["a", "a", "b"]
+    with pytest.raises(ValueError, match="need 3"):
+        st._pick(pool, {"b": 3}, set(), lambda a: a)

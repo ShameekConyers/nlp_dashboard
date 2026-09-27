@@ -98,6 +98,7 @@ def _writers() -> dict[str, Callable[[Study], object]]:
         "transformer_score": lambda s: st.score_study(s, None, "doc"),  # type: ignore[arg-type]
         "transformer_validate": lambda s: st.validate(s, s),
         "sentence_audit": lambda s: st.sentence_audit_metrics(s, "m"),
+        "sentence_dev_select": st.sentence_dev_selection,
         "reference_sentiment": lambda s: st.reference_sentiment_check(s, Path("missing.json")),
     }
 

@@ -263,8 +263,8 @@ def test_run_uses_adopted_transformer_for_sentiment_views(
     conn.execute("INSERT INTO sentiment_models (model_id, model_name, model_revision) "
                  "VALUES (7, 'm/x', 'r1')")
     conn.execute(
-        "INSERT INTO sentiment_scores SELECT id, 7, 'doc', -1, "
-        "CASE WHEN recommended THEN 0.9 ELSE 0.1 END FROM documents"
+        "INSERT INTO sentiment_scores (document_id, model_id, unit, sentence_idx, positive_prob) "
+        "SELECT id, 7, 'doc', -1, CASE WHEN recommended THEN 0.9 ELSE 0.1 END FROM documents"
     )
     conn.execute(
         "INSERT INTO analysis_runs (stage, params, metrics) VALUES ('sentiment_validation', '{}', ?)",

@@ -23,6 +23,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from src.utils import MIN_TOKEN_COUNT  # noqa: E402
+from src.validation import classify_sentence  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Standard four-table join used by most queries.
@@ -854,6 +855,62 @@ def get_model_doc_scores(conn: sqlite3.Connection, model_name: str, revision: st
         conn,
         params=[model_name, revision],
     )
+
+
+def get_aspect_sentence_sentiment(
+    conn: sqlite3.Connection,
+    model_name: str,
+    revision: str,
+    band: tuple[float, float] | None,
+) -> pd.DataFrame:
+    """Count aspect sentences by sentence-level class per aspect and game.
+
+    Each distinct tagged sentence is classified once per aspect it carries:
+    by argmax for a three-class model, or by ``band`` for a binary one.
+
+    Args:
+        conn: Open study connection with sentence scores.
+        model_name: Hugging Face id of the audited sentence model.
+        revision: Its pinned revision.
+        band: Neither band for a binary model; ignored when the model stores
+            a neutral probability.
+
+    Returns:
+        DataFrame with ``aspect``, ``app_id``, ``app_name``, ``negative``,
+        ``neither``, ``positive`` and ``n`` (sentence counts).
+    """
+    rows = pd.read_sql_query(
+        """
+        SELECT a.aspect, d.app_id, m.app_name, s.positive_prob, s.neutral_prob
+        FROM aspect_mentions a
+        JOIN sentiment_scores s
+          ON s.document_id = a.document_id AND s.sentence_idx = a.sentence_idx
+         AND s.unit = 'sentence'
+        JOIN sentiment_models sm ON sm.model_id = s.model_id
+        JOIN documents d ON d.id = a.document_id
+        JOIN metadata m ON m.app_id = d.app_id
+        WHERE sm.model_name = ? AND sm.model_revision = ?
+        """,
+        conn,
+        params=[model_name, revision],
+    )
+    classes = ["negative", "neither", "positive"]
+    if rows.empty:
+        return pd.DataFrame(columns=["aspect", "app_id", "app_name", *classes, "n"])
+    fallback = band or (0.5, 0.5)
+    rows["cls"] = [
+        classify_sentence(p, None if pd.isna(n) else float(n), fallback)
+        for p, n in zip(rows["positive_prob"], rows["neutral_prob"])
+    ]
+    counts = (
+        rows.groupby(["aspect", "app_id", "app_name"])["cls"]
+        .value_counts()
+        .unstack(fill_value=0)
+        .reindex(columns=classes, fill_value=0)
+        .reset_index()
+    )
+    counts["n"] = counts[classes].sum(axis=1)
+    return counts
 
 
 def has_stratified_pulls(conn: sqlite3.Connection) -> bool:

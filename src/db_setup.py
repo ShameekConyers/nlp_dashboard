@@ -265,6 +265,8 @@ CREATE INDEX IF NOT EXISTS idx_theme_stats_scope ON theme_stats(run_id, scope_ty
 # carries no foreign key. sentence_idx is -1 for document-level rows. Each
 # score row carries a small model_id; sentiment_models maps it to the model
 # name and pinned revision, which keeps the committed seed inside its size cap.
+# neutral_prob is NULL for binary models and P(neutral) for three-class models,
+# whose P(negative) is 1 - positive_prob - neutral_prob.
 _SCORES_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS analysis_runs (
     run_id     INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -288,9 +290,21 @@ CREATE TABLE IF NOT EXISTS sentiment_scores (
     unit           TEXT NOT NULL CHECK (unit IN ('doc', 'sentence')),
     sentence_idx   INTEGER NOT NULL,
     positive_prob  REAL NOT NULL,
+    neutral_prob   REAL,
     PRIMARY KEY (document_id, model_id, unit, sentence_idx)
 ) WITHOUT ROWID;
 """
+
+
+def _add_neutral_prob(conn: sqlite3.Connection) -> None:
+    """Add ``sentiment_scores.neutral_prob`` to a database created before it existed.
+
+    Args:
+        conn: Active SQLite connection with the score tables present.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(sentiment_scores)")}
+    if "neutral_prob" not in cols:
+        conn.execute("ALTER TABLE sentiment_scores ADD COLUMN neutral_prob REAL")
 
 
 def create_study_tables(conn: sqlite3.Connection) -> None:
@@ -305,18 +319,21 @@ def create_study_tables(conn: sqlite3.Connection) -> None:
     create_tables(conn)
     conn.executescript(_STUDY_SCHEMA_SQL)
     conn.executescript(_SCORES_SCHEMA_SQL)
+    _add_neutral_prob(conn)
 
 
 def create_scores_tables(conn: sqlite3.Connection) -> None:
     """Create only ``analysis_runs``, ``sentiment_models`` and ``sentiment_scores``.
 
     Used for a transformer-scores sidecar database, such as the one beside the
-    April seed, whose own file must not change.
+    April seed, whose own file must not change. An existing ``sentiment_scores``
+    table without ``neutral_prob`` gains the column.
 
     Args:
         conn: Active SQLite connection.
     """
     conn.executescript(_SCORES_SCHEMA_SQL)
+    _add_neutral_prob(conn)
 
 
 def load_raw_json(json_path: Path) -> list[dict]:

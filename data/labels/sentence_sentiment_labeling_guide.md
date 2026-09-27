@@ -1,12 +1,12 @@
-# Sentence sentiment audit: labeling guide (v1)
+# Sentence sentiment audit: labeling guide
 
-This guide is for the person or model who labels the sentence sentiment audit. The labels check whether the transformer's sentence-level sentiment scores for aspect sentences can be trusted.
+This guide is for the person or model who labels a sentence sentiment audit set. The labels check whether a transformer's sentence-level sentiment scores for aspect sentences can be trusted. Two sets exist: `v1` (100 rows, the first test read) and `v2` (200 rows, the fresh test set for the three-class model; it contains no `v1` sentence). The rules are the same for both.
 
 ## Input and output
 
-- Input: `data/labels/sentence_sentiment_audit_v1_unlabeled.csv`, 100 rows. Each row is one sentence from a Steam review in the test split, tagged with a design or control aspect that passed the precision audit. The sample is spread evenly across those aspects, and each sentence appears once.
-- Fill the `label` column of every row with exactly one of `positive`, `negative` or `neither`. Leave every other column unchanged. Save the result as a separate file, for example `outputs/audit/sentence_sentiment_audit_v1_labeled.csv`.
-- The builder imports it with `.venv/bin/python src/sentiment_transformer.py import-labels <labeled csv>`, which writes `data/labels/sentence_sentiment_audit_v1.csv` (ids, aspect and label only).
+- Input: `data/labels/sentence_sentiment_audit_<version>_unlabeled.csv`. Each row is one sentence from a Steam review in the test split, tagged with a design or control aspect that passed the precision audit. The sample is spread across those aspects as evenly as their supply of unused test sentences allows, and each sentence appears once.
+- Fill the `label` column of every row with exactly one of `positive`, `negative` or `neither`. Leave every other column unchanged. Save the result as a separate file, for example `outputs/audit/sentence_sentiment_audit_<version>_labeled.csv`.
+- The builder imports it with `.venv/bin/python src/sentiment_transformer.py import-labels <labeled csv> --version <version>`, which writes `data/labels/sentence_sentiment_audit_<version>.csv` (ids, aspect and label only).
 
 ## How to judge a row
 
@@ -22,4 +22,4 @@ When a reasonable reader could go either way between `positive` or `negative` an
 
 ## Provenance
 
-The labels are made by a model labeler separate from the builder and are disclosed as model-made in the README. The user may relabel any row later; the audit metrics are recomputed from `data/labels/sentence_sentiment_audit_v1.csv` by `src/sentiment_transformer.py audit-metrics`, so relabeling changes the reported numbers reproducibly.
+The labels are made by a model labeler separate from the builder and are disclosed as model-made in the README. The labeler sees this guide and the sentences, never a model score. The user may relabel any row later; the audit metrics are recomputed from `data/labels/sentence_sentiment_audit_<version>.csv` by `src/sentiment_transformer.py audit-metrics --version <version>`, so relabeling changes the reported numbers reproducibly.

@@ -83,6 +83,87 @@ def macro_f1_multiclass(y_true: Sequence[str], y_pred: Sequence[str], classes: S
     return float(np.mean(scores))
 
 
+def sentence_class(prob: float, band: tuple[float, float]) -> str:
+    """Map a binary model's positive probability to positive, negative or neither.
+
+    Args:
+        prob: Positive-class probability.
+        band: ``(low, high)``; strictly inside is ``neither``, at or above
+            ``high`` is ``positive``, at or below ``low`` is ``negative``.
+
+    Returns:
+        The class name.
+    """
+    if prob >= band[1]:
+        return "positive"
+    if prob <= band[0]:
+        return "negative"
+    return "neither"
+
+
+def sentence_class3(positive: float, neutral: float) -> str:
+    """Map a three-class model's probabilities to their argmax class.
+
+    Args:
+        positive: P(positive).
+        neutral: P(neutral); P(negative) is the remainder.
+
+    Returns:
+        ``positive``, ``negative`` or ``neither`` (the neutral head).
+    """
+    negative = 1.0 - positive - neutral
+    best = max(("positive", positive), ("negative", negative), ("neither", neutral),
+               key=lambda kv: kv[1])
+    return best[0]
+
+
+def classify_sentence(positive: float, neutral: float | None, band: tuple[float, float]) -> str:
+    """Classify one sentence score from either kind of model.
+
+    Args:
+        positive: P(positive).
+        neutral: P(neutral) for a three-class model, None for a binary one.
+        band: Neither band used when ``neutral`` is None.
+
+    Returns:
+        The class name.
+    """
+    if neutral is None:
+        return sentence_class(positive, band)
+    return sentence_class3(positive, neutral)
+
+
+def tune_band(
+    y_true: Sequence[str],
+    probs: Sequence[float],
+    grid: Sequence[float],
+    classes: Sequence[str],
+    anchor: float,
+) -> tuple[tuple[float, float], float]:
+    """Pick the symmetric neither band ``(c, 1 - c)`` with the highest macro-F1.
+
+    Ties go to the ``c`` nearest ``anchor``.
+
+    Args:
+        y_true: Three-class labels.
+        probs: A binary model's positive probabilities, aligned with ``y_true``.
+        grid: Candidate values of ``c``.
+        classes: Classes averaged by ``macro_f1_multiclass``.
+        anchor: Tie-break value of ``c``.
+
+    Returns:
+        ``((c, 1 - c), macro_f1)``.
+    """
+    best_c, best_f1 = grid[0], -1.0
+    for c in grid:
+        f1 = macro_f1_multiclass(y_true, [sentence_class(p, (c, 1 - c)) for p in probs], classes)
+        if f1 > best_f1 + 1e-12 or (
+            abs(f1 - best_f1) <= 1e-12 and abs(c - anchor) < abs(best_c - anchor)
+        ):
+            best_c, best_f1 = c, f1
+    return (float(best_c), float(round(1 - best_c, 10))), float(best_f1)
+
+
 def roc_auc(y_true: Sequence[bool] | np.ndarray, score: Sequence[float] | np.ndarray) -> float:
     """ROC AUC by the rank-sum formula, ties at average rank.
 

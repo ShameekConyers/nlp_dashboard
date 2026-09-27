@@ -7,6 +7,7 @@ import pytest
 
 from dashboard.queries import (
     get_aspect_examples,
+    get_aspect_sentence_sentiment,
     get_cohort_options,
     get_cohort_stats,
     get_filtered_theme_points,
@@ -179,3 +180,27 @@ def test_model_doc_scores_filters_model_revision_and_unit() -> None:
     df = get_model_doc_scores(db, "m/a", "r1").sort_values("document_id")
     assert df["document_id"].tolist() == [10, 11]
     assert df["positive_prob"].tolist() == [0.9, 0.2]
+
+
+def test_aspect_sentence_sentiment_counts_by_argmax_or_band(conn: sqlite3.Connection) -> None:
+    """Three-class rows use argmax; binary rows use the band; counts group per aspect and game."""
+    conn.execute("INSERT INTO aspect_mentions VALUES (2, 'map_design', 0, 'maps', 0, 6, 'v1')")
+    conn.execute("INSERT INTO aspect_mentions VALUES (2, 'ai_quality', 0, 'ai', 0, 6, 'v1')")
+    conn.executemany(
+        "INSERT INTO sentiment_models (model_id, model_name, model_revision) VALUES (?, ?, ?)",
+        [(1, "three/class", "r"), (2, "bin/ary", "r")],
+    )
+    conn.executemany(
+        "INSERT INTO sentiment_scores (document_id, model_id, unit, sentence_idx, positive_prob,"
+        " neutral_prob) VALUES (?, ?, ?, ?, ?, ?)",
+        [(1, 1, "sentence", 0, 0.2, 0.7), (2, 1, "sentence", 0, 0.1, 0.2),
+         (1, 2, "sentence", 0, 0.5, None), (2, 2, "sentence", 0, 0.05, None)],
+    )
+    three = get_aspect_sentence_sentiment(conn, "three/class", "r", None)
+    rows = {(r.aspect, r.app_name): (r.negative, r.neither, r.positive, r.n)
+            for r in three.itertuples()}
+    assert rows == {("map_design", "G1"): (1, 1, 0, 2), ("ai_quality", "G1"): (1, 0, 0, 1)}
+    binary = get_aspect_sentence_sentiment(conn, "bin/ary", "r", (0.2, 0.8))
+    rows = {(r.aspect, r.app_name): (r.negative, r.neither, r.positive) for r in binary.itertuples()}
+    assert rows == {("map_design", "G1"): (1, 1, 0), ("ai_quality", "G1"): (1, 0, 0)}
+    assert get_aspect_sentence_sentiment(conn, "none", "r", None).empty
