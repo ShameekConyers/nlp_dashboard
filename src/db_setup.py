@@ -12,7 +12,14 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from src.study import DEFAULT_STUDY_PATH, Study, load_study
+from src.study import (
+    DEFAULT_STUDY_PATH,
+    UNFREEZE_FLAG,
+    UNFREEZE_HELP,
+    Study,
+    guard_writable,
+    load_study,
+)
 from src.utils import (
     FULL_DB_PATH,
     GAME_CATALOG,
@@ -133,6 +140,7 @@ CREATE TABLE IF NOT EXISTS pull_runs (
     baseline_total_positive INTEGER,
     baseline_total_negative INTEGER,
     baseline_total_reviews  INTEGER,
+    stratified              BOOLEAN NOT NULL DEFAULT 0,  -- review_type filtered the pull
     UNIQUE (app_id, pulled_at)
 );
 
@@ -510,14 +518,19 @@ def insert_pull_run(conn: sqlite3.Connection, manifest: dict) -> None:
     """
     summary = manifest.get("query_summary") or {}
     base = manifest.get("baseline_summary") or {}
+    # Databases created before Phase 8 have no stratified column; they only
+    # ever held natural pulls.
+    has_flag = any(r[1] == "stratified" for r in conn.execute("PRAGMA table_info(pull_runs)"))
+    stratified = bool(manifest.get("stratified", False))
     conn.execute(
-        """
+        f"""
         INSERT OR IGNORE INTO pull_runs
             (app_id, params, baseline_params, pulled_at, pages, reviews_collected,
              cap, cap_hit, stop_reason, effective_window_start, effective_window_end,
              total_positive, total_negative, total_reviews,
-             baseline_total_positive, baseline_total_negative, baseline_total_reviews)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             baseline_total_positive, baseline_total_negative, baseline_total_reviews
+             {", stratified" if has_flag else ""})
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?{", ?" if has_flag else ""})
         """,
         (
             manifest["app_id"],
@@ -537,8 +550,11 @@ def insert_pull_run(conn: sqlite3.Connection, manifest: dict) -> None:
             base.get("total_positive"),
             base.get("total_negative"),
             base.get("total_reviews"),
+            *((stratified,) if has_flag else ()),
         ),
     )
+    if stratified and not has_flag:
+        raise ValueError("A stratified pull needs a pull_runs table with the stratified column.")
 
 
 def insert_steam_languages(conn: sqlite3.Connection, reviews: list[dict]) -> None:
@@ -562,20 +578,28 @@ def insert_steam_languages(conn: sqlite3.Connection, reviews: list[dict]) -> Non
     )
 
 
-def load_study_full(study: Study) -> int:
+def load_study_full(study: Study, unfreeze: bool = False) -> int:
     """Load every cached raw file of a study into its full database.
 
     Raw files are located by app ID from the study (``<app_id>.json`` plus
     the ``<app_id>.pull.json`` manifest), never by parsing file names.
+    Reviews whose ``timestamp_created`` falls outside the study window
+    (``sampling.window_start``/``window_end``) are not loaded.
     Loading is idempotent: documents dedupe on ``steam_review_id`` and pull
     runs on ``(app_id, pulled_at)``.
 
     Args:
         study: The study to load.
+        unfreeze: Allow writing a frozen study's full database.
 
     Returns:
         Total document count in the full database after loading.
+
+    Raises:
+        FrozenStudyError: If the full database belongs to a frozen study and
+            ``unfreeze`` is False.
     """
+    guard_writable([study.full_db], unfreeze)
     study.full_db.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(study.full_db)
     try:
@@ -587,13 +611,29 @@ def load_study_full(study: Study) -> int:
             if not (raw_path.exists() and manifest_path.exists()):
                 logger.warning("No cached pull for %s (%d). Skipping.", app.name, app.app_id)
                 continue
-            reviews = load_raw_json(raw_path)
+            # Skip rows already loaded: an ignored INSERT still advances the
+            # AUTOINCREMENT counter, and a rerun should change nothing.
+            known = {
+                r[0] for r in conn.execute(
+                    "SELECT steam_review_id FROM documents WHERE app_id = ?", (app.app_id,)
+                )
+            }
+            reviews = [
+                r for r in load_raw_json(raw_path)
+                if study.sampling.in_window(r.get("timestamp_created"))
+                and str(r.get("recommendationid", "")) not in known
+            ]
             with open(manifest_path, encoding="utf-8") as f:
                 manifest = json.load(f)
+            loaded = conn.execute(
+                "SELECT 1 FROM pull_runs WHERE app_id = ? AND pulled_at = ?",
+                (manifest["app_id"], manifest["finished_at"]),
+            ).fetchone()
             conn.execute("BEGIN")
             insert_documents(conn, reviews, app.app_id, app.name)
             insert_steam_languages(conn, reviews)
-            insert_pull_run(conn, manifest)
+            if not loaded:
+                insert_pull_run(conn, manifest)
             conn.commit()
         total = conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
         logger.info("Study %s full DB: %d documents.", study.name, total)
@@ -607,6 +647,8 @@ def build_natural_seed(
     seed_path: Path,
     cap_per_game: int,
     random_seed: int,
+    window: tuple[int | None, int | None] = (None, None),
+    unfreeze: bool = False,
 ) -> dict[int, int]:
     """Write a uniform random per-game sample of the full DB to a new seed DB.
 
@@ -622,10 +664,19 @@ def build_natural_seed(
         seed_path: Destination seed DB path. An existing file is replaced.
         cap_per_game: Maximum reviews per game.
         random_seed: Base seed for the per-game samples.
+        window: Inclusive ``timestamp_created`` bounds in Unix seconds; reviews
+            outside are not sampled, so a narrowed window takes effect even
+            when the full database holds older loads.
+        unfreeze: Allow replacing a frozen study's seed database.
 
     Returns:
         ``{app_id: sampled_count}``.
+
+    Raises:
+        FrozenStudyError: If ``seed_path`` belongs to a frozen study and
+            ``unfreeze`` is False.
     """
+    guard_writable([seed_path], unfreeze)
     if seed_path.exists():
         seed_path.unlink()
     seed_path.parent.mkdir(parents=True, exist_ok=True)
@@ -648,10 +699,14 @@ def build_natural_seed(
             for r in full_conn.execute("SELECT DISTINCT app_id FROM documents ORDER BY app_id")
         ]
         for app_id in app_ids:
+            lo, hi = window
             ids = sorted(
                 r[0]
                 for r in full_conn.execute(
-                    "SELECT steam_review_id FROM documents WHERE app_id = ?", (app_id,)
+                    "SELECT steam_review_id FROM documents WHERE app_id = ? "
+                    "AND (? IS NULL OR timestamp_created >= ?) "
+                    "AND (? IS NULL OR timestamp_created <= ?)",
+                    (app_id, lo, lo, hi, hi),
                 )
             )
             rng = random.Random(f"{random_seed}:{app_id}")
@@ -722,12 +777,13 @@ def vacuum(db_path: Path) -> float:
     return db_path.stat().st_size / (1024 * 1024)
 
 
-def main_study(study: Study, full: bool) -> None:
+def main_study(study: Study, full: bool, unfreeze: bool = False) -> None:
     """Study entry point: load raw pulls into the full DB and build the seed.
 
     Args:
         study: A natural-sampling study.
         full: If False, only report the seed's document count.
+        unfreeze: Allow writing a frozen study's databases.
     """
     if not full:
         if study.seed_db.exists():
@@ -738,7 +794,8 @@ def main_study(study: Study, full: bool) -> None:
         else:
             logger.error("No seed DB at %s. Run with --full first.", study.seed_db)
         return
-    load_study_full(study)
+    guard_writable([study.full_db, study.seed_db], unfreeze)
+    load_study_full(study, unfreeze)
     full_conn = sqlite3.connect(study.full_db)
     try:
         build_natural_seed(
@@ -746,17 +803,20 @@ def main_study(study: Study, full: bool) -> None:
             study.seed_db,
             study.sampling.seed_cap_per_game,
             study.sampling.random_seed,
+            (study.sampling.window_start, study.sampling.window_end),
+            unfreeze,
         )
     finally:
         full_conn.close()
     logger.info("Seed DB size after VACUUM: %.2f MB", vacuum(study.seed_db))
 
 
-def main(mode: str = "seed") -> None:
+def main(mode: str = "seed", unfreeze: bool = False) -> None:
     """Entry point. Creates tables and loads data in the given mode.
 
     Args:
         mode: 'seed' (default) or 'full'.
+        unfreeze: Allow the full mode to rebuild the frozen April databases.
     """
     db_path = get_db_path(mode)
 
@@ -772,6 +832,7 @@ def main(mode: str = "seed") -> None:
         return
 
     # Full mode: load all raw JSON into full.db, then build seed.db
+    guard_writable([FULL_DB_PATH, SEED_DB_PATH], unfreeze)
     logger.info("Full mode: loading raw JSON into %s", db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -836,9 +897,14 @@ if __name__ == "__main__":
         default=DEFAULT_STUDY_PATH,
         help="Study TOML file (default: the April 2026 baseline).",
     )
+    parser.add_argument(UNFREEZE_FLAG, dest="unfreeze", action="store_true", help=UNFREEZE_HELP)
     args = parser.parse_args()
     selected = load_study(args.study)
-    if selected.sampling.method == "natural":
-        main_study(selected, full=args.full)
-    else:
-        main(mode="full" if args.full else "seed")
+    try:
+        if selected.sampling.method == "natural":
+            main_study(selected, full=args.full, unfreeze=args.unfreeze)
+        else:
+            main(mode="full" if args.full else "seed", unfreeze=args.unfreeze)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(2)

@@ -6,6 +6,8 @@
 data/raw/
 data/full.db
 data/market_full.db
+data/*_full.db
+studies/*.toml.tmp
 
 # Private planning documents
 docs/private_docs/

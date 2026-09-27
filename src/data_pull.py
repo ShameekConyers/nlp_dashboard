@@ -15,7 +15,17 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import requests
 
-from src.study import DEFAULT_STUDY_PATH, AppSpec, Baseline, Sampling, Study, load_study
+from src.study import (
+    DEFAULT_STUDY_PATH,
+    UNFREEZE_FLAG,
+    UNFREEZE_HELP,
+    AppSpec,
+    Baseline,
+    Sampling,
+    Study,
+    guard_writable,
+    load_study,
+)
 from src.utils import GAME_IDS, RAW_DIR, get_logger
 
 logger = get_logger(__name__)
@@ -264,8 +274,10 @@ def _main_legacy() -> None:
 def build_review_params(sampling: Sampling, cursor: str) -> dict[str, str]:
     """Build appreviews query parameters for one census page.
 
-    ``review_type`` is always ``all``: filtering on the recommend flag would
-    stratify the sample and break the natural recommend rate.
+    ``review_type`` is ``all`` for natural studies. ``positive`` or
+    ``negative`` pass only for studies loaded with ``stratified = true``
+    (``study.load_study`` enforces this), whose recommend rate is then fixed
+    by design.
 
     Args:
         sampling: The study's sampling parameters.
@@ -278,7 +290,7 @@ def build_review_params(sampling: Sampling, cursor: str) -> dict[str, str]:
         "json": "1",
         "filter": sampling.filter,
         "language": sampling.language,
-        "review_type": "all",
+        "review_type": sampling.review_type,
         "purchase_type": sampling.purchase_type,
         "filter_offtopic_activity": str(sampling.filter_offtopic_activity),
         "num_per_page": str(sampling.num_per_page),
@@ -538,6 +550,7 @@ def census_pull(app: AppSpec, study: Study) -> dict[str, Any] | None:
         "reviews_collected": len(reviews),
         "cap": cap,
         "cap_hit": stop_reason == "cap",
+        "stratified": sampling.stratified,
         "stop_reason": stop_reason,
         "effective_window_start": min(timestamps) if timestamps else None,
         "effective_window_end": max(timestamps) if timestamps else None,
@@ -565,7 +578,7 @@ def census_pull(app: AppSpec, study: Study) -> dict[str, Any] | None:
     return manifest
 
 
-def pull_study(study: Study) -> list[dict[str, Any]]:
+def pull_study(study: Study, unfreeze: bool = False) -> list[dict[str, Any]]:
     """Run the census pull for every app in a study, skipping cached apps.
 
     The run stops at the first app whose requests keep failing, so a rate
@@ -573,10 +586,15 @@ def pull_study(study: Study) -> list[dict[str, Any]]:
 
     Args:
         study: The study to pull.
+        unfreeze: Allow writing a frozen study's raw directory.
 
     Returns:
         Manifests for the apps that are cached after this run.
+
+    Raises:
+        FrozenStudyError: If the study is frozen and ``unfreeze`` is False.
     """
+    guard_writable([study.raw_dir], unfreeze)
     manifests: list[dict[str, Any]] = []
     for app in study.apps:
         try:
@@ -599,12 +617,18 @@ def main() -> None:
         default=DEFAULT_STUDY_PATH,
         help="Study TOML file (default: the April 2026 baseline).",
     )
+    parser.add_argument(UNFREEZE_FLAG, dest="unfreeze", action="store_true", help=UNFREEZE_HELP)
     args = parser.parse_args()
     study = load_study(args.study)
-    if study.sampling.method != "natural":
-        _main_legacy()
-        return
-    pull_study(study)
+    try:
+        if study.sampling.method != "natural":
+            guard_writable([study.raw_dir], args.unfreeze)
+            _main_legacy()
+            return
+        pull_study(study, unfreeze=args.unfreeze)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(2)
 
 
 if __name__ == "__main__":

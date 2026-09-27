@@ -36,7 +36,9 @@ from dashboard.queries import (  # noqa: E402
     get_filter_options,
     get_filtered_theme_points,
     get_game_stats,
+    get_kept_reviews_frame,
     get_latest_run,
+    get_model_doc_scores,
     get_overview_kpis,
     get_pull_windows,
     get_recommend_share_by_game,
@@ -53,8 +55,10 @@ from dashboard.queries import (  # noqa: E402
     get_theme_stats,
     get_topic_distribution,
     get_topic_words,
+    has_stratified_pulls,
     has_study_tables,
 )
+from src.stats import wilson_interval  # noqa: E402
 from src.study import STUDIES_DIR, Study, load_study  # noqa: E402
 from src.utils import get_db_path  # noqa: E402
 
@@ -107,7 +111,11 @@ def _load_studies() -> list[Study]:
     for path in sorted(STUDIES_DIR.glob("*.toml")):
         if path.name.startswith("aspects_"):
             continue
-        study = load_study(path)
+        try:
+            study = load_study(path)
+        except (ValueError, KeyError, OSError) as exc:  # a broken user file must not stop the app
+            print(f"Skipping study {path.name}: {exc}", file=sys.stderr)
+            continue
         if study.seed_db.exists():
             studies.append(study)
     studies.sort(key=lambda s: s.name != DEFAULT_STUDY_NAME)
@@ -155,6 +163,14 @@ run_metrics: dict = _run[1] if _run else {}
 _ref = get_latest_run(conn, "reference_checks") if is_market else None
 ref_metrics: dict = _ref[1] if _ref else {}
 has_model: bool = bool(run_metrics.get("sentiment_model"))
+# A stratified pull fixes the recommend rate by design, so it is not a market rate.
+design_fixed: bool = (
+    study.sampling.method != "natural" or study.sampling.stratified or has_stratified_pulls(conn)
+)
+REC_NOTE: str = (
+    "The recommend rate in this study is design-fixed: the sample was stratified on the "
+    "recommend flag, so recommend shares describe the sampling design, not the market."
+)
 _audit = get_latest_run(conn, "sentence_audit") if is_market else None
 sentence_audit: dict = _audit[1] if _audit else {}
 # Transformer validation lives in the study's scores database: the market seed
@@ -172,8 +188,9 @@ sentiment_validation: dict | None = (
 # ---------------------------------------------------------------------------
 
 _BASE_VIEWS = ["Overview", "Sentiment Analysis", "Topic Analysis", "Review Explorer"]
-_MARKET_VIEWS = ["Market Overview", "Topics x Sentiment", "Design Themes", "Methods"]
-_views = (_MARKET_VIEWS + _BASE_VIEWS) if is_market else _BASE_VIEWS
+_MARKET_VIEWS = ["Market Overview", "Topics x Sentiment", "Design Themes", "Cohort Comparison",
+                 "Methods"]
+_views = (_MARKET_VIEWS + _BASE_VIEWS) if is_market else _BASE_VIEWS + ["Cohort Comparison"]
 if st.session_state.get("view") not in _views:
     st.session_state["view"] = _views[0]
 
@@ -384,7 +401,10 @@ def _render_market_overview() -> None:
     else:
         c4.metric("VADER balanced accuracy (test)", _pct(val.get("balanced_accuracy")))
 
-    st.subheader("Natural recommend share per game")
+    if design_fixed:
+        st.warning(REC_NOTE)
+    st.subheader("Recommend share per game (design-fixed)" if design_fixed
+                 else "Natural recommend share per game")
     st.caption(
         "Dots: share of all seed reviews (a uniform sample of the pull) that recommend the "
         "game, with a Wilson 95% interval. Crosses: the same share among kept English "
@@ -423,7 +443,7 @@ def _render_market_overview() -> None:
                       yaxis=dict(autorange="reversed"), margin=dict(t=10))
     st.plotly_chart(fig, width="stretch")
 
-    st.subheader("Cohort recommend share (macro average)")
+    st.subheader("Cohort recommend share (macro average" + (", design-fixed)" if design_fixed else ")"))
     cohorts = get_cohort_stats(conn, run_id)
     cohorts = cohorts[cohorts["scope_type"].isin(["cohort", "subgroup", "subgroup_matched"])]
     cohorts["scope"] = [_scope_label(t, i) for t, i in zip(cohorts["scope_type"], cohorts["scope_id"])]
@@ -667,7 +687,11 @@ def _render_design_themes() -> None:
     precision = run_metrics.get("aspect_precision", {})
     status = run_metrics.get("aspect_audit_status", "labels pending")
     if status != "complete":
-        st.warning("Precision audit labels are pending. No aspect supports a claim yet.")
+        st.warning(
+            f"Lexicon `{run_metrics.get('lexicon_version', '')}` is unaudited for this study. "
+            "Every aspect row is descriptive and supports no claim until a precision audit "
+            "passes (see README, Run your own study)."
+        )
     show_unreliable = st.toggle("Show aspects without a passing precision audit", value=False)
 
     def reliable(aspect: str) -> bool:
@@ -766,6 +790,217 @@ def _render_design_themes() -> None:
 
 
 # ---------------------------------------------------------------------------
+# View: Cohort Comparison
+# ---------------------------------------------------------------------------
+
+
+def _fmt_ci(value: float | None, low: float | None, high: float | None, pct: bool = True) -> str:
+    """Format a value with its interval.
+
+    Args:
+        value: Point estimate.
+        low: Lower bound.
+        high: Upper bound.
+        pct: Format as a percentage (else two decimals).
+
+    Returns:
+        For example ``12.4% (9.8 to 15.1)``, or ``n/a``.
+    """
+    if value is None or pd.isna(value):
+        return "n/a"
+    if pct:
+        head = f"{100 * value:.1f}%"
+        tail = (f" ({100 * low:.1f} to {100 * high:.1f})"
+                if low is not None and high is not None and not pd.isna(low) and not pd.isna(high)
+                else "")
+    else:
+        head = f"{value:.2f}"
+        tail = (f" ({low:.2f} to {high:.2f})"
+                if low is not None and high is not None and not pd.isna(low) and not pd.isna(high)
+                else "")
+    return head + tail
+
+
+def _render_cohort_comparison_precomputed() -> None:
+    """Compare two cohort-level scopes on one theme from the stats run."""
+    cohorts = get_cohort_stats(conn, run_id)
+    scopes = [(t, i) for t, i in zip(cohorts["scope_type"], cohorts["scope_id"])]
+    labels = {sc: (_scope_label(*sc) if sc[0] != "cohort" else f"Cohort: {_scope_label(*sc)}")
+              for sc in scopes}
+    if len(scopes) < 2:
+        st.info("This study has fewer than two cohort-level scopes to compare.")
+        return
+    left, right = st.columns(2)
+    order = sorted(scopes, key=lambda sc: (sc[0] != "cohort", sc[0], sc[1]))
+    by_label = {labels[sc]: sc for sc in order}
+    a = by_label[left.selectbox("Scope A", list(by_label), index=0, key="cmp_a")]
+    b = by_label[right.selectbox("Scope B", list(by_label), index=1, key="cmp_b")]
+    if a == b:
+        st.info("Pick two different scopes.")
+        return
+    lens = {"Aspects": "aspect", "Topics": "topic"}[
+        st.radio("Lens", ["Aspects", "Topics"], horizontal=True, key="cmp_lens")
+    ]
+    precision = run_metrics.get("aspect_precision", {})
+    frames = []
+    for sc in (a, b):
+        df = get_theme_stats(conn, run_id, lens, sc[0])
+        frames.append(df[df["scope_id"] == sc[1]].set_index("theme"))
+    themes = sorted(set(frames[0].index) | set(frames[1].index),
+                    key=lambda t: (int(t) if lens == "topic" else 0, t))
+    if not themes:
+        st.info("No theme statistics for these scopes.")
+        return
+
+    def theme_name(t: str) -> str:
+        lbl = frames[0]["topic_label"].get(t) if t in frames[0].index else None
+        name = _theme_label(lens, t, lbl)
+        if lens == "aspect" and not precision.get(t, {}).get("passes") and t != "turn_structure_any":
+            name += " (unaudited or failed audit)"
+        return name
+
+    theme_by_name = {theme_name(t): t for t in themes}
+    theme = theme_by_name[st.selectbox("Theme", list(theme_by_name), key="cmp_theme")]
+    st.caption(
+        "Side-by-side precomputed statistics. No test of the difference between the two scopes "
+        "is made: overlapping intervals do not show the scopes are alike, and separate "
+        "intervals are not a pre-registered test. Findings follow the per-scope rule in Methods."
+        + (" " + REC_NOTE if design_fixed else "")
+    )
+    coh = cohorts.set_index(["scope_type", "scope_id"])
+
+    def cell(row: pd.Series | None, stem: str, low: str | None = None, pct: bool = True) -> str:
+        """Format ``row[stem]`` with its interval columns (``<low>_ci_low``/``_ci_high``)."""
+        if row is None:
+            return "n/a"
+        base = low or stem
+        lo = row.get(f"{base}_ci_low") if low is not None else None
+        hi = row.get(f"{base}_ci_high") if low is not None else None
+        return _fmt_ci(row[stem], lo, hi, pct=pct)
+
+    rows = []
+    for sc, df in zip((a, b), frames):
+        r = df.loc[theme] if theme in df.index else None
+        c = coh.loc[sc]
+        row = {
+            "Scope": labels[sc],
+            "Games (eligible)": f"{int(c['n_games'])} ({int(c['n_eligible'])})",
+            "Reviews": str(int(r["n_docs"])) if r is not None else "0",
+            "Theme share": cell(r, "share", "share"),
+            "Complaint share": cell(r, "complaint_share", "complaint"),
+            "Praise share": cell(r, "praise_share", "praise"),
+            "Complaint lift": cell(r, "lift", "lift", pct=False),
+            "Status": _finding_badge(r["finding"]) if r is not None else "n/a",
+            "Recommended in theme": cell(r, "rec_share_in_theme"),
+            "Scope recommend share": cell(c, "macro_rec_share", "macro_rec"),
+        }
+        if has_model:
+            row["RoBERTa positive in theme"] = cell(r, "model_pos_share")
+            row["Scope RoBERTa positive"] = cell(c, "macro_model_pos_share", "macro_model_pos")
+        rows.append(row)
+    st.dataframe(pd.DataFrame(rows).set_index("Scope").T, width="stretch")
+
+    fig = go.Figure()
+    for side, color in (("complaint", "#d62728"), ("praise", "#1f77b4")):
+        xs, ys, lo, hi = [], [], [], []
+        for sc, df in zip((a, b), frames):
+            if theme in df.index:
+                r = df.loc[theme]
+                xs.append(labels[sc])
+                ys.append(r[f"{side}_share"])
+                lo.append(r[f"{side}_share"] - r[f"{side}_ci_low"] if pd.notna(r[f"{side}_ci_low"]) else 0)
+                hi.append(r[f"{side}_ci_high"] - r[f"{side}_share"] if pd.notna(r[f"{side}_ci_high"]) else 0)
+        fig.add_trace(go.Bar(x=xs, y=ys, name=f"{side.capitalize()} share", marker_color=color,
+                             error_y=dict(type="data", symmetric=False, array=hi, arrayminus=lo)))
+    fig.update_layout(barmode="group", yaxis_tickformat=".0%", height=360, margin=dict(t=10))
+    st.plotly_chart(fig, width="stretch")
+
+    st.subheader("Every theme in the lens")
+    both = pd.DataFrame({
+        "Theme": [theme_name(t) for t in themes],
+        f"Lift, {labels[a]}": [frames[0]["lift"].get(t) for t in themes],
+        f"Lift, {labels[b]}": [frames[1]["lift"].get(t) for t in themes],
+        f"Complaint share, {labels[a]}": [frames[0]["complaint_share"].get(t) for t in themes],
+        f"Complaint share, {labels[b]}": [frames[1]["complaint_share"].get(t) for t in themes],
+    })
+    st.dataframe(both, hide_index=True, width="stretch",
+                 column_config={c: st.column_config.NumberColumn(format="%.3f")
+                                for c in both.columns if c != "Theme"})
+
+
+def _render_cohort_comparison_live() -> None:
+    """Compare two cohorts of a study without precomputed statistics (April)."""
+    st.caption(
+        "This study has no precomputed cohort statistics or aspect tagging, and its files stay "
+        "unchanged, so the comparison is computed live from the seed: pooled shares with "
+        "Wilson 95% intervals, no cluster bootstrap and no finding rule. "
+        + (REC_NOTE if design_fixed else "")
+    )
+    reviews = get_kept_reviews_frame(conn)
+    cohort_of = {a.app_id: a.cohort for a in study.apps}
+    reviews["cohort"] = reviews["app_id"].map(cohort_of)
+    reviews = reviews.dropna(subset=["cohort"])
+    model_label = None
+    if sentiment_validation and sentiment_validation.get("adopted") and _scores_path.exists():
+        m = sentiment_validation["models"][sentiment_validation["selected"]]
+        scores = get_model_doc_scores(_get_connection(str(_scores_path)), m["model_name"], m["revision"])
+        if not scores.empty:
+            reviews = reviews.merge(scores, on="document_id", how="left")
+            reviews["model_pos"] = reviews["positive_prob"] >= 0.5
+            model_label = "RoBERTa positive"
+    cohorts = sorted(reviews["cohort"].unique())
+    if len(cohorts) < 2:
+        st.info("This study has fewer than two cohorts.")
+        return
+    left, right = st.columns(2)
+    a = left.selectbox("Cohort A", cohorts, index=0, key="live_a")
+    b = right.selectbox("Cohort B", cohorts, index=1, key="live_b")
+    if a == b:
+        st.info("Pick two different cohorts.")
+        return
+    topics = {int(k): v for k, v in get_filter_options(conn)["topic_labels"].items()}
+    choices = ["Overall sentiment"] + [f"Topic {t}: {lbl}" for t, lbl in sorted(topics.items())]
+    pick = st.selectbox("Theme", choices, key="live_theme")
+
+    def share(sub: pd.DataFrame, mask: pd.Series) -> str:
+        k, n = int(mask.sum()), len(sub)
+        lo, hi = wilson_interval(k, n) if n else (None, None)
+        return _fmt_ci(k / n if n else None, lo, hi)
+
+    rows = []
+    for c in (a, b):
+        sub = reviews[reviews["cohort"] == c]
+        row = {"Cohort": c, "Games": sub["app_id"].nunique(), "Kept reviews": len(sub),
+               "Recommend share": share(sub, sub["recommended"] == 1),
+               "Mean VADER": f"{sub['compound'].mean():.3f}"}
+        if model_label:
+            row[model_label] = share(sub, sub["model_pos"].fillna(False))
+        if pick != "Overall sentiment":
+            tid = int(pick.split(":")[0].split()[1])
+            in_t = sub["topic_id"] == tid
+            not_rec = sub[sub["recommended"] == 0]
+            rec = sub[sub["recommended"] == 1]
+            row["Topic share"] = share(sub, in_t)
+            row["Complaint share"] = share(not_rec, not_rec["topic_id"] == tid)
+            row["Praise share"] = share(rec, rec["topic_id"] == tid)
+        rows.append(row)
+    st.dataframe(pd.DataFrame(rows).set_index("Cohort").T.astype(str), width="stretch")
+
+
+def _render_cohort_comparison() -> None:
+    """Render the Cohort Comparison view."""
+    st.header("Cohort Comparison")
+    st.caption(study.title)
+    if _filters_notice():
+        st.info("Cohort Comparison uses the unfiltered study; clear the sidebar filters.")
+        return
+    if is_market and run_id is not None:
+        _render_cohort_comparison_precomputed()
+    else:
+        _render_cohort_comparison_live()
+
+
+# ---------------------------------------------------------------------------
 # View: Methods
 # ---------------------------------------------------------------------------
 
@@ -782,11 +1017,18 @@ def _render_methods() -> None:
         f"- Census pull, newest first, capped at {samp.raw_cap_per_game:,} reviews per game. "
         f"Capped games cover a recent window; the others cover their full history.\n"
         f"- Seed: a uniform random sample of up to {samp.seed_cap_per_game} reviews per game "
-        f"(seed {samp.random_seed}), no stratification, so recommend shares are natural.\n"
-        "- Kept reviews: at least 10 characters and 3 content tokens after cleaning. A review "
+        f"(seed {samp.random_seed}), "
+        + ("stratified on the recommend flag, so recommend shares are design-fixed.\n"
+           if design_fixed else "no stratification, so recommend shares are natural.\n")
+        + "- Kept reviews: at least 10 characters and 3 content tokens after cleaning. A review "
         "is dropped as non-English only when lingua's top language is not English at "
         "confidence 0.50 or higher."
     )
+    if samp.window_start is not None or samp.window_end is not None:
+        fmt = lambda t: (datetime.fromtimestamp(t, tz=timezone.utc).strftime("%Y-%m-%d")  # noqa: E731
+                         if t is not None else "open")
+        st.markdown(f"- Review window applied at load: {fmt(samp.window_start)} to "
+                    f"{fmt(samp.window_end)} (UTC, by review creation time).")
     windows = get_pull_windows(conn)
     if not windows.empty:
         for col in ("effective_window_start", "effective_window_end"):
@@ -1058,6 +1300,8 @@ def _render_sentiment() -> None:
 
     # Ground truth validation: sentiment vs recommendation
     st.subheader("Sentiment vs. Recommendation (Ground Truth Validation)")
+    if design_fixed:
+        st.caption(REC_NOTE + " The review counts below show that design.")
     rec_df = get_sentiment_vs_recommendation(conn, **filters)
     rec_df["recommended_label"] = rec_df["recommended"].map(
         {0: "Not Recommended", 1: "Recommended"}
@@ -1336,6 +1580,8 @@ elif view == "Topics x Sentiment":
     _render_topics_sentiment()
 elif view == "Design Themes":
     _render_design_themes()
+elif view == "Cohort Comparison":
+    _render_cohort_comparison()
 elif view == "Methods":
     _render_methods()
 elif view == "Overview":

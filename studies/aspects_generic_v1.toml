@@ -1,0 +1,98 @@
+# Generic phrase lexicon for Steam reviews of any genre (UNAUDITED).
+#
+# Each aspect lists case-insensitive regular expressions. A sentence is tagged
+# with an aspect when any include pattern matches and no exclude pattern does.
+# This lexicon has not been audited on any study. Until a study runs the
+# precision audit (src/aspects.py --export-audit / --import-labels) and an
+# aspect reaches 80% precision on at least 30 test-split sentences, its rows
+# are descriptive only and support no finding; the dashboard marks them
+# unaudited. Changes need a new version.
+
+[lexicon]
+version = "generic_v1"
+
+[[aspects]]
+name = "bugs"
+kind = "control"
+label = "Bugs and crashes"
+include = [
+    '\b(bugs?|buggy|glitch\w*|crash\w*|softlock\w*|game[- ]breaking|broken save|save corrupt\w*|freez\w*)\b',
+]
+exclude = [
+    '\b(insects?|bug[- ]type|bug pokemon|space bugs?|alien bugs?)\b',
+]
+
+[[aspects]]
+name = "performance"
+kind = "control"
+label = "Performance and optimization"
+include = [
+    '\b(fps|frame ?rates?|frames per second|stutter\w*|lag\w*|optimi[sz]\w*|load(ing)? times?|runs? (poorly|badly|smooth\w*|great|well|fine))\b',
+]
+exclude = [
+    '\blag(ging)? behind\b',
+]
+
+[[aspects]]
+name = "price"
+kind = "control"
+label = "Price, value and DLC"
+include = [
+    '\b(price[ds]?|pricing|overpriced|worth (it|the (money|price))|not worth|value for (the )?money|full price|on sale|discount\w*|refund\w*|dlcs?|microtransactions?|pay[- ]?to[- ]?win|cash grab)\b',
+]
+exclude = []
+
+[[aspects]]
+name = "content"
+kind = "design"
+label = "Amount of content and replayability"
+include = [
+    '\b(content|replay(ability|able|value)|hours of (gameplay|content|fun)|too short|short game|endgame|end[- ]game|repetitive|grind\w*)\b',
+]
+exclude = [
+    '\b(content creators?|youtube content|content warning)\b',
+]
+
+[[aspects]]
+name = "difficulty"
+kind = "design"
+label = "Difficulty and learning curve"
+include = [
+    '\b(difficult(y|ies)?|too (hard|easy)|punishing|learning curve|steep curve|tutorials?|beginner|newcomers?|unforgiving|souls-?like|hard mode|easy mode)\b',
+]
+exclude = []
+
+[[aspects]]
+name = "ui"
+kind = "control"
+label = "UI and controls"
+include = [
+    '\b(ui|user interface|interface|menus?|hud|tooltips?|controls?|keybind\w*|controller support|camera)\b',
+]
+exclude = [
+    '\bcontrol (points?|zones?)\b',
+    '\bmind control\b',
+]
+
+[[aspects]]
+name = "story"
+kind = "design"
+label = "Story, writing and characters"
+include = [
+    '\b(story|stories|storyline|plot|narrative|writing|written|characters?|dialog(ue)?s?|lore|ending|voice acting|quests?)\b',
+]
+exclude = [
+    '\bwritten (a|this) review\b',
+    '\b(multi-?story|story mode difficulty)\b',
+]
+
+[[aspects]]
+name = "multiplayer"
+kind = "design"
+label = "Multiplayer, co-op and community"
+include = [
+    '\b(multiplayer|multi-player|co-?op|online|pvp|matchmaking|servers?|netcode|cheaters?|hackers?|community|friends)\b',
+]
+exclude = [
+    '\bonline (store|purchase|shop)\b',
+]

@@ -32,7 +32,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from src.db_setup import create_study_tables
 from src.stats import dev_test_split
-from src.study import Study, load_study
+from src.study import UNFREEZE_FLAG, UNFREEZE_HELP, Study, guard_writable, load_study
 from src.utils import DATA_DIR, MIN_TOKEN_COUNT, OUTPUTS_DIR, get_logger
 
 logger = get_logger(__name__)
@@ -244,7 +244,7 @@ def fetch_kept_documents(conn: sqlite3.Connection) -> list[tuple[int, str, str]]
     ).fetchall()
 
 
-def run(study: Study) -> int:
+def run(study: Study, unfreeze: bool = False) -> int:
     """Tag every kept English review in the study seed and write aspect_mentions.
 
     Existing rows for the lexicon version are replaced, so reruns are
@@ -252,15 +252,18 @@ def run(study: Study) -> int:
 
     Args:
         study: A study with an ``aspect_lexicon``.
+        unfreeze: Allow writing a frozen study's seed database.
 
     Returns:
         Number of aspect_mentions rows written.
 
     Raises:
         ValueError: If the study has no aspect lexicon.
+        FrozenStudyError: If the study is frozen and ``unfreeze`` is False.
     """
     if study.aspect_lexicon is None:
         raise ValueError(f"Study {study.name} has no aspect_lexicon.")
+    guard_writable([study.seed_db], unfreeze)
     lexicon = load_lexicon(study.aspect_lexicon)
     conn = sqlite3.connect(study.seed_db)
     try:
@@ -473,14 +476,19 @@ def main() -> None:
     parser.add_argument(
         "--import-labels", type=Path, default=None, help="Labeled audit CSV to import."
     )
+    parser.add_argument(UNFREEZE_FLAG, dest="unfreeze", action="store_true", help=UNFREEZE_HELP)
     args = parser.parse_args()
     study = load_study(args.study)
-    if args.import_labels is not None:
-        import_labels(study, args.import_labels)
-    elif args.export_audit:
-        export_audit(study)
-    else:
-        run(study)
+    try:
+        if args.import_labels is not None:
+            import_labels(study, args.import_labels)
+        elif args.export_audit:
+            export_audit(study)
+        else:
+            run(study, unfreeze=args.unfreeze)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(2)
 
 
 if __name__ == "__main__":

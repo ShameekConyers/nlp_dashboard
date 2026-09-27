@@ -117,13 +117,16 @@ def test_insert_documents_skips_empty_text() -> None:
 
 
 def test_committed_dbs_under_25mb() -> None:
-    """Verify the committed databases together stay under 25 MB."""
-    total_mb = sum(
-        p.stat().st_size
-        for p in (SEED_DB_PATH, MARKET_SEED_DB_PATH, APRIL_SCORES_DB_PATH)
-        if p.exists()
-    ) / (1024 * 1024)
-    assert total_mb < 25, f"committed DBs total {total_mb:.2f} MB, exceeds 25 MB limit"
+    """Verify every seed DB plus the April sidecar stays under 25 MiB and 25 MB.
+
+    Any ``data/*_seed.db`` counts, so a new study's seed is caught before it
+    is committed past the budget.
+    """
+    files = {SEED_DB_PATH, APRIL_SCORES_DB_PATH, *SEED_DB_PATH.parent.glob("*_seed.db")}
+    assert MARKET_SEED_DB_PATH in files or not MARKET_SEED_DB_PATH.exists()
+    total = sum(p.stat().st_size for p in files if p.exists())
+    assert total < 25 * 1024 * 1024, f"seed DBs total {total / 1024**2:.2f} MiB, over 25 MiB"
+    assert total < 25_000_000, f"seed DBs total {total / 1e6:.2f} MB, over 25 MB"
 
 
 def test_market_seed_db_under_20mib() -> None:

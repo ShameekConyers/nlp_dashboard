@@ -12,6 +12,8 @@ full_db = "data/market_full.db"
 raw_dir = "data/raw/strategy_market_2026"
 language_filter = true
 aspect_lexicon = "studies/aspects_strategy_v1.toml"
+# Shipped study: stages refuse to write its files without --unfreeze-i-know.
+frozen = true
 
 [sampling]
 method = "natural"            # census pull, uniform per-game seed sample

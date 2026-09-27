@@ -799,3 +799,83 @@ def get_recommend_share_by_game(
         ORDER BY rec_share DESC
     """
     return pd.read_sql_query(sql, conn, params=params)
+
+
+def get_kept_reviews_frame(conn: sqlite3.Connection) -> pd.DataFrame:
+    """Return one row per kept review for live cohort comparisons.
+
+    Used for studies without precomputed statistics (the April baseline).
+
+    Args:
+        conn: Open SQLite connection.
+
+    Returns:
+        DataFrame with ``document_id``, ``app_id``, ``recommended``,
+        ``compound`` and ``topic_id`` (-1 when unassigned).
+    """
+    return pd.read_sql_query(
+        """
+        SELECT d.id AS document_id, d.app_id, d.recommended,
+               n.sentiment_compound AS compound, COALESCE(n.topic_id, -1) AS topic_id
+        FROM documents d
+        JOIN processed_documents p ON p.document_id = d.id
+        JOIN nlp_results n ON n.document_id = d.id
+        WHERE p.token_count >= ?
+        """,
+        conn,
+        params=[MIN_TOKEN_COUNT],
+    )
+
+
+def get_model_doc_scores(conn: sqlite3.Connection, model_name: str, revision: str) -> pd.DataFrame:
+    """Return one transformer model's document-level positive probabilities.
+
+    Args:
+        conn: Connection to a scores database (market seed or April sidecar).
+        model_name: Hugging Face model id.
+        revision: Pinned revision.
+
+    Returns:
+        DataFrame with ``document_id`` and ``positive_prob``; empty when the
+        database has no score tables.
+    """
+    has = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sentiment_models'"
+    ).fetchone()
+    if has is None:
+        return pd.DataFrame(columns=["document_id", "positive_prob"])
+    return pd.read_sql_query(
+        """
+        SELECT s.document_id, s.positive_prob
+        FROM sentiment_scores s
+        JOIN sentiment_models m ON m.model_id = s.model_id
+        WHERE m.model_name = ? AND m.model_revision = ? AND s.unit = 'doc'
+        """,
+        conn,
+        params=[model_name, revision],
+    )
+
+
+def has_stratified_pulls(conn: sqlite3.Connection) -> bool:
+    """Return whether any recorded pull filtered on the recommend flag.
+
+    Reads the ``stratified`` column where it exists (Phase 8 databases) and
+    falls back to the recorded request ``review_type``.
+
+    Args:
+        conn: Open SQLite connection.
+
+    Returns:
+        True if a pull was stratified by design.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(pull_runs)")}
+    if not cols:
+        return False
+    if "stratified" in cols and conn.execute(
+        "SELECT 1 FROM pull_runs WHERE stratified LIMIT 1"
+    ).fetchone():
+        return True
+    return conn.execute(
+        "SELECT 1 FROM pull_runs WHERE json_extract(params, '$.review_type') "
+        "NOT IN ('all') LIMIT 1"
+    ).fetchone() is not None

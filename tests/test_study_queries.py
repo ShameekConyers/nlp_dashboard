@@ -11,7 +11,9 @@ from dashboard.queries import (
     get_cohort_stats,
     get_filtered_theme_points,
     get_game_stats,
+    get_kept_reviews_frame,
     get_latest_run,
+    get_model_doc_scores,
     get_pull_windows,
     get_recommend_share_by_game,
     get_sentiment_validation,
@@ -144,3 +146,36 @@ def test_sentiment_validation_reads_scores_sidecar() -> None:
             (json.dumps({"selected": selected}),),
         )
     assert get_sentiment_validation(db) == {"selected": "roberta_large"}
+
+
+def test_kept_reviews_frame_drops_sentinels_and_fills_missing_topics(
+    conn: sqlite3.Connection,
+) -> None:
+    """Reviews under the token floor are excluded; an unassigned topic reads as -1."""
+    conn.execute("UPDATE processed_documents SET token_count = 1 WHERE document_id = 4")
+    conn.execute("UPDATE nlp_results SET topic_id = NULL WHERE document_id = 3")
+    df = get_kept_reviews_frame(conn).sort_values("document_id")
+    assert df["document_id"].tolist() == [1, 2, 3]
+    assert df["topic_id"].tolist() == [0, -1, -1]
+    assert df["recommended"].tolist() == [1, 0, 1]
+    assert df["compound"].tolist() == [0.5, -0.5, 0.5]
+
+
+def test_model_doc_scores_filters_model_revision_and_unit() -> None:
+    """Only document scores of the named model and revision come back."""
+    db = sqlite3.connect(":memory:")
+    assert get_model_doc_scores(db, "m/a", "r1").empty
+    create_scores_tables(db)
+    db.executemany(
+        "INSERT INTO sentiment_models (model_id, model_name, model_revision) VALUES (?, ?, ?)",
+        [(1, "m/a", "r1"), (2, "m/a", "r2"), (3, "m/b", "r1")],
+    )
+    db.executemany(
+        "INSERT INTO sentiment_scores (document_id, model_id, unit, sentence_idx, positive_prob) "
+        "VALUES (?, ?, ?, ?, ?)",
+        [(10, 1, "doc", -1, 0.9), (11, 1, "doc", -1, 0.2), (10, 1, "sentence", 0, 0.7),
+         (10, 2, "doc", -1, 0.4), (10, 3, "doc", -1, 0.1)],
+    )
+    df = get_model_doc_scores(db, "m/a", "r1").sort_values("document_id")
+    assert df["document_id"].tolist() == [10, 11]
+    assert df["positive_prob"].tolist() == [0.9, 0.2]

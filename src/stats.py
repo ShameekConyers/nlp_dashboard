@@ -44,7 +44,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from src.study import Study, load_study
+from src.study import UNFREEZE_FLAG, UNFREEZE_HELP, Study, guard_writable, load_study
 from src.utils import (
     MIN_TOKEN_COUNT,
     PROJECT_ROOT,
@@ -737,16 +737,21 @@ def _scopes(study: Study, eligible: set[int], kept_ok: set[int]) -> list[tuple[s
     return scopes
 
 
-def run(study: Study, n_boot: int = N_BOOT) -> int:
+def run(study: Study, n_boot: int = N_BOOT, unfreeze: bool = False) -> int:
     """Compute and store all statistics for a study seed.
 
     Args:
         study: A natural-sampling study whose NLP stages have run.
         n_boot: Bootstrap resamples.
+        unfreeze: Allow writing a frozen study's seed database.
 
     Returns:
         The new ``analysis_runs.run_id``.
+
+    Raises:
+        FrozenStudyError: If the study is frozen and ``unfreeze`` is False.
     """
+    guard_writable([study.seed_db], unfreeze)
     from src.aspects import ANY_TURN_STRUCTURE, TURN_STRUCTURE_ASPECTS, audit_paths, load_lexicon
     from src.db_setup import create_study_tables
 
@@ -766,7 +771,11 @@ def run(study: Study, n_boot: int = N_BOOT) -> int:
             )
         ]
 
-        aspect_names = [a.name for a in lexicon.aspects] + [ANY_TURN_STRUCTURE]
+        lexicon_names = [a.name for a in lexicon.aspects]
+        # The derived turn-structure theme exists only for lexicons that define
+        # every turn-structure aspect (the strategy lexicon), not the generic one.
+        derived = [ANY_TURN_STRUCTURE] if set(TURN_STRUCTURE_ASPECTS) <= set(lexicon_names) else []
+        aspect_names = lexicon_names + derived
         theme_keys: list[tuple[str, str]] = [("aspect", a) for a in aspect_names] + [
             ("topic", str(t)) for t, _ in topics
         ]
@@ -791,9 +800,10 @@ def run(study: Study, n_boot: int = N_BOOT) -> int:
             m = np.zeros((len(rs), len(theme_keys)), dtype=bool)
             for i, r in enumerate(rs):
                 tags = aspect_sets.get(r.document_id, set())
-                for j, name in enumerate(aspect_names[:-1]):
+                for j, name in enumerate(lexicon_names):
                     m[i, j] = name in tags
-                m[i, len(aspect_names) - 1] = bool(tags & set(TURN_STRUCTURE_ASPECTS))
+                if derived:
+                    m[i, len(aspect_names) - 1] = bool(tags & set(TURN_STRUCTURE_ASPECTS))
                 if r.topic_id in topic_index:
                     m[i, len(aspect_names) + topic_index[r.topic_id]] = True
             games[app_id] = GameData(
@@ -912,9 +922,10 @@ def run(study: Study, n_boot: int = N_BOOT) -> int:
             (lens, name): lens == "topic" or bool(precision.get(name, {}).get("passes"))
             for lens, name in theme_keys
         }
-        precision_ok[("aspect", ANY_TURN_STRUCTURE)] = all(
-            precision.get(a, {}).get("passes") for a in TURN_STRUCTURE_ASPECTS
-        )
+        if derived:
+            precision_ok[("aspect", ANY_TURN_STRUCTURE)] = all(
+                precision.get(a, {}).get("passes") for a in TURN_STRUCTURE_ASPECTS
+            )
 
         for app_id, g in games.items():
             point = game_theme_metrics(g)
@@ -1050,10 +1061,11 @@ def run(study: Study, n_boot: int = N_BOOT) -> int:
             "aspect_precision": precision,
             "aspect_audit_status": "complete" if precision else "labels pending",
             "topic_labels": {str(t): label for t, label in topics},
+            "lexicon_version": lexicon.version,
             "aspect_labels": {a.name: a.label for a in lexicon.aspects}
-            | {ANY_TURN_STRUCTURE: "Any turn-structure aspect"},
+            | ({ANY_TURN_STRUCTURE: "Any turn-structure aspect"} if derived else {}),
             "aspect_kinds": {a.name: a.kind for a in lexicon.aspects}
-            | {ANY_TURN_STRUCTURE: "design"},
+            | ({ANY_TURN_STRUCTURE: "design"} if derived else {}),
         }
         conn.execute(
             "UPDATE analysis_runs SET metrics = ? WHERE run_id = ?",
@@ -1129,7 +1141,7 @@ def _top_themes(
 # ---------------------------------------------------------------------------
 
 
-def reference_checks(study: Study, reference_path: Path) -> int:
+def reference_checks(study: Study, reference_path: Path, unfreeze: bool = False) -> int:
     """Compare the pull with a prior research table and store derived numbers only.
 
     The reference file is read at run time and never copied. Stored numbers:
@@ -1141,10 +1153,15 @@ def reference_checks(study: Study, reference_path: Path) -> int:
     Args:
         study: The study.
         reference_path: Path to the research JSON.
+        unfreeze: Allow writing a frozen study's seed database.
 
     Returns:
         The new ``analysis_runs.run_id``.
+
+    Raises:
+        FrozenStudyError: If the study is frozen and ``unfreeze`` is False.
     """
+    guard_writable([study.seed_db], unfreeze)
     from src.aspects import TURN_STRUCTURE_ASPECTS, load_lexicon, tagged_share
     from src.db_setup import create_study_tables
 
@@ -1259,7 +1276,7 @@ LARGE_UNMATCHED_TOPIC_SHARE: float = 0.05
 reviews is reported as a possible missing theme (report only, no lexicon change)."""
 
 
-def coverage_proxy(study: Study) -> int:
+def coverage_proxy(study: Study, unfreeze: bool = False) -> int:
     """Measure how many not-recommended reviews the lexicon misses, and where they go.
 
     For each scope (all games, each cohort, each subgroup), the share of
@@ -1269,10 +1286,15 @@ def coverage_proxy(study: Study) -> int:
 
     Args:
         study: The study.
+        unfreeze: Allow writing a frozen study's seed database.
 
     Returns:
         The new ``analysis_runs.run_id`` (stage ``coverage_proxy``).
+
+    Raises:
+        FrozenStudyError: If the study is frozen and ``unfreeze`` is False.
     """
+    guard_writable([study.seed_db], unfreeze)
     from src.aspects import audit_paths, load_lexicon
     from src.db_setup import create_study_tables
 
@@ -1345,14 +1367,19 @@ def main() -> None:
         "--coverage", action="store_true",
         help="Store the lexicon coverage proxy (unmatched not-recommended reviews by topic).",
     )
+    parser.add_argument(UNFREEZE_FLAG, dest="unfreeze", action="store_true", help=UNFREEZE_HELP)
     args = parser.parse_args()
     study = load_study(args.study)
-    if args.coverage:
-        coverage_proxy(study)
-    elif args.reference is not None:
-        reference_checks(study, args.reference)
-    else:
-        run(study, n_boot=args.n_boot)
+    try:
+        if args.coverage:
+            coverage_proxy(study, unfreeze=args.unfreeze)
+        elif args.reference is not None:
+            reference_checks(study, args.reference, unfreeze=args.unfreeze)
+        else:
+            run(study, n_boot=args.n_boot, unfreeze=args.unfreeze)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(2)
 
 
 if __name__ == "__main__":

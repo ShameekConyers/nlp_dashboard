@@ -39,7 +39,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from src.db_setup import create_scores_tables
 from src.stats import BOOT_SEED, N_BOOT, _git_sha, _num, balanced_accuracy, dev_test_split
-from src.study import Study, load_study
+from src.study import UNFREEZE_FLAG, UNFREEZE_HELP, Study, guard_writable, load_study
 from src.utils import (
     DATA_DIR,
     HEAD_TOKENS,
@@ -338,6 +338,7 @@ def score_study(
     scorer: TransformerScorer,
     unit: str,
     lexicon_version: str | None = None,
+    unfreeze: bool = False,
 ) -> dict[str, Any]:
     """Score one unit of a study with one model and store the probabilities.
 
@@ -350,10 +351,16 @@ def score_study(
         scorer: The model.
         unit: ``doc`` or ``sentence``.
         lexicon_version: Required for ``sentence``.
+        unfreeze: Allow writing a frozen (shipped) study's scores database.
 
     Returns:
         Timing and counts, also stored as an ``analysis_runs`` row.
+
+    Raises:
+        FrozenStudyError: If a target belongs to a frozen study and ``unfreeze``
+            is False.
     """
+    guard_writable([study.scores_path], unfreeze)
     src = _read_only(study.seed_db)
     try:
         inputs = (
@@ -484,7 +491,13 @@ def _predictors(frame: dict[str, np.ndarray], mask: np.ndarray, tuned: float) ->
     return preds
 
 
-def validate(market: Study, april: Study, n_boot: int = N_BOOT, seed: int = BOOT_SEED) -> dict[str, Any]:
+def validate(
+    market: Study,
+    april: Study,
+    n_boot: int = N_BOOT,
+    seed: int = BOOT_SEED,
+    unfreeze: bool = False,
+) -> dict[str, Any]:
     """Run the Decision 11 selection, test read and adoption verdict.
 
     Dev-split work (VADER threshold, candidate selection) finishes before any
@@ -496,10 +509,16 @@ def validate(market: Study, april: Study, n_boot: int = N_BOOT, seed: int = BOOT
         april: The April baseline (continuity only).
         n_boot: Bootstrap resamples.
         seed: Random seed.
+        unfreeze: Allow writing a frozen (shipped) study's scores databases.
 
     Returns:
         The metrics dictionary that was stored.
+
+    Raises:
+        FrozenStudyError: If either scores database belongs to a frozen study
+            and ``unfreeze`` is False.
     """
+    guard_writable([market.scores_path, april.scores_path], unfreeze)
     mk = load_validation_frame(market)
     split = np.array([dev_test_split(r) for r in mk["steam_review_id"]])
     dev, test = split == "dev", split == "test"
@@ -767,18 +786,24 @@ def sentence_class(prob: float, band: tuple[float, float] = SENTENCE_NEITHER_BAN
     return "neither"
 
 
-def sentence_audit_metrics(study: Study, model_name: str) -> dict[str, Any]:
+def sentence_audit_metrics(study: Study, model_name: str, unfreeze: bool = False) -> dict[str, Any]:
     """Score the committed sentence labels against one model's sentence scores.
 
     Args:
         study: The market study.
         model_name: Hugging Face id of the scored model.
+        unfreeze: Allow writing a frozen (shipped) study's scores database.
 
     Returns:
         Macro-F1 over three classes (the gate), binary macro-F1 on sentences
         labelled positive or negative, the confusion counts and whether the
         gate passed. Also stored as a ``sentence_audit`` run.
+
+    Raises:
+        FrozenStudyError: If a target belongs to a frozen study and ``unfreeze``
+            is False.
     """
+    guard_writable([study.scores_path], unfreeze)
     _, committed = sentence_audit_paths()
     with open(committed, encoding="utf-8", newline="") as f:
         labels = list(csv.DictReader(f))
@@ -828,6 +853,7 @@ def reference_sentiment_check(
     reference_path: Path,
     scorer_factory: Callable[[str, str], TransformerScorer] = TransformerScorer,
     n_boot: int = N_BOOT,
+    unfreeze: bool = False,
 ) -> dict[str, Any]:
     """Score hand-coded praise and complaint mentions and store derived numbers only.
 
@@ -839,11 +865,17 @@ def reference_sentiment_check(
         reference_path: Private research JSON.
         scorer_factory: Builds a scorer from ``(model_name, revision)``.
         n_boot: Bootstrap resamples for the balanced-accuracy interval.
+        unfreeze: Allow writing a frozen (shipped) study's scores database.
 
     Returns:
         Per-scorer balanced accuracy with interval and n, stored as a
         ``reference_sentiment_check`` run.
+
+    Raises:
+        FrozenStudyError: If a target belongs to a frozen study and ``unfreeze``
+            is False.
     """
+    guard_writable([study.scores_path], unfreeze)
     from nltk.sentiment.vader import SentimentIntensityAnalyzer
 
     with open(reference_path, encoding="utf-8") as f:
@@ -901,10 +933,12 @@ def main() -> None:
     p.add_argument("--units", default="doc,sentence")
     p.add_argument("--models", default="all", help="Comma-separated model ids, or all.")
     p.add_argument("--batch-size", type=int, default=16)
+    p.add_argument(UNFREEZE_FLAG, dest="unfreeze", action="store_true", help=UNFREEZE_HELP)
     p = sub.add_parser("validate", help="Decision 11 selection, test read and verdict.")
     p.add_argument("--market", type=Path, required=True)
     p.add_argument("--april", type=Path, required=True)
     p.add_argument("--n-boot", type=int, default=N_BOOT)
+    p.add_argument(UNFREEZE_FLAG, dest="unfreeze", action="store_true", help=UNFREEZE_HELP)
     p = sub.add_parser("export-audit", help="Write the unlabeled sentence audit set.")
     p.add_argument("--study", type=Path, required=True)
     p = sub.add_parser("import-labels", help="Validate and commit sentence audit labels.")
@@ -912,13 +946,29 @@ def main() -> None:
     p = sub.add_parser("audit-metrics", help="Score the sentence audit.")
     p.add_argument("--study", type=Path, required=True)
     p.add_argument("--model", default=None, help="Model id; default the selected candidate.")
+    p.add_argument(UNFREEZE_FLAG, dest="unfreeze", action="store_true", help=UNFREEZE_HELP)
     p = sub.add_parser("reference-check", help="Decision 14 sentence-sentiment check.")
     p.add_argument("--study", type=Path, required=True)
     p.add_argument("--reference", type=Path, required=True)
+    p.add_argument(UNFREEZE_FLAG, dest="unfreeze", action="store_true", help=UNFREEZE_HELP)
     args = parser.parse_args()
+    try:
+        _dispatch(args)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+
+def _dispatch(args: argparse.Namespace) -> None:
+    """Run the parsed subcommand.
+
+    Args:
+        args: Parsed CLI arguments.
+    """
 
     if args.cmd == "score":
         study = load_study(args.study)
+        guard_writable([study.scores_path], args.unfreeze)  # before any model loads
         names = list(TRANSFORMER_CANDIDATES) if args.models == "all" else args.models.split(",")
         version = None
         if study.aspect_lexicon is not None:
@@ -930,9 +980,12 @@ def main() -> None:
             for unit in args.units.split(","):
                 if unit == "sentence" and version is None:
                     continue
-                logger.info("Result: %s", score_study(study, scorer, unit, version))
+                logger.info("Result: %s", score_study(study, scorer, unit, version, args.unfreeze))
     elif args.cmd == "validate":
-        m = validate(load_study(args.market), load_study(args.april), n_boot=args.n_boot)
+        m = validate(
+            load_study(args.market), load_study(args.april), n_boot=args.n_boot,
+            unfreeze=args.unfreeze,
+        )
         logger.info("Selected %s, adopted %s", m["selected"], m["adopted"])
     elif args.cmd == "export-audit":
         export_sentence_audit(load_study(args.study))
@@ -949,10 +1002,11 @@ def main() -> None:
                 conn.close()
             assert v is not None, "Run validate first."
             model = v["models"][v["selected"]]["model_name"]
-        logger.info("Sentence audit: %s", sentence_audit_metrics(study, model))
+        logger.info("Sentence audit: %s", sentence_audit_metrics(study, model, args.unfreeze))
     elif args.cmd == "reference-check":
         logger.info("Reference check: %s",
-                    reference_sentiment_check(load_study(args.study), args.reference))
+                    reference_sentiment_check(
+            load_study(args.study), args.reference, unfreeze=args.unfreeze))
 
 
 if __name__ == "__main__":

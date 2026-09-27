@@ -23,7 +23,14 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from src.db_setup import create_tables
-from src.study import DEFAULT_STUDY_PATH, Study, load_study
+from src.study import (
+    DEFAULT_STUDY_PATH,
+    UNFREEZE_FLAG,
+    UNFREEZE_HELP,
+    Study,
+    guard_writable,
+    load_study,
+)
 from src.utils import (
     MIN_TOKEN_COUNT,
     VADER_POSITIVE_THRESHOLD,
@@ -271,6 +278,7 @@ def run(
     rebuild: bool = False,
     batch_size: int = 500,
     study: Study | None = None,
+    unfreeze: bool = False,
 ) -> None:
     """End-to-end sentiment scoring on the chosen DB.
 
@@ -288,11 +296,15 @@ def run(
         rebuild: If True, wipe nlp_results before re-scoring.
         batch_size: Number of rows per batch for scoring and writing.
         study: Study whose databases to use. None means the April baseline.
+        unfreeze: Allow writing a frozen (shipped) study's database.
 
     Raises:
+        FrozenStudyError: If the database belongs to a frozen study and
+            ``unfreeze`` is False.
         FileNotFoundError: If the target database does not exist.
     """
     db_path = get_db_path(mode) if study is None else get_db_path(mode, study)
+    guard_writable([db_path], unfreeze)
     if not db_path.exists():
         raise FileNotFoundError(
             f"{db_path} does not exist. Run db_setup.py --full first."
@@ -426,14 +438,20 @@ def main() -> None:
         default=DEFAULT_STUDY_PATH,
         help="Study TOML file (default: the April 2026 baseline).",
     )
+    parser.add_argument(UNFREEZE_FLAG, dest="unfreeze", action="store_true", help=UNFREEZE_HELP)
     args = parser.parse_args()
     study = load_study(args.study)
-    run(
-        mode="full" if args.full else "seed",
-        rebuild=args.rebuild,
-        batch_size=args.batch_size,
-        study=None if study.name == "april_2026_baseline" else study,
-    )
+    try:
+        run(
+            mode="full" if args.full else "seed",
+            rebuild=args.rebuild,
+            batch_size=args.batch_size,
+            study=None if study.name == "april_2026_baseline" else study,
+            unfreeze=args.unfreeze,
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(2)
 
 
 if __name__ == "__main__":

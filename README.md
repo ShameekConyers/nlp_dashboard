@@ -240,11 +240,12 @@ Topic quality is weak on this corpus. One English cluster holds 97% of kept revi
 
 ## Dashboard
 
-The Streamlit dashboard opens on the market study; a sidebar selector switches to the April baseline. Filters push down to SQLite queries.
+The Streamlit dashboard opens on the market study. The sidebar selector lists every `studies/*.toml` whose seed database exists, including studies you build yourself. Filters push down to SQLite queries.
 
 - **Market Overview:** natural recommend share per game with Wilson intervals and the population share, cohort averages with cluster-bootstrap intervals and per-game dots, RoBERTa positive share and VADER per cohort and per game, median playtime by recommend flag.
 - **Topics x Sentiment:** complaint lift per topic with intervals for each cohort, subgroup or matched basket, recommend share, RoBERTa positive share and VADER inside each topic, finding or descriptive status, and a topic by game heatmap.
 - **Design Themes:** aspect complaint shares by cohort and per game, example sentences, and a link into Review Explorer filtered by aspect. Aspects without a passing audit stay behind a toggle.
+- **Cohort Comparison:** any two cohorts, subgroups or matched baskets side by side on any aspect or topic, from the precomputed statistics: theme, complaint and praise shares with intervals, lift, finding status, and each scope's recommend and sentiment shares. It makes no test of the difference. For the April baseline, whose files stay frozen, it compares genres live from the seed on recommend share, sentiment and topic shares with Wilson intervals.
 - **Methods:** sampling parameters, pull window per game, drop counts, the finding rule, the comparison count, VADER validation, the adopted sentiment model and sentence audit, the lexicon coverage check and the check against the earlier study.
 - **Sentiment Analysis:** opens with the held-out model comparison for the selected study (market test split, or the April seed and its strategy titles) and the adoption verdict.
 - **Overview, Sentiment Analysis, Topic Analysis, Review Explorer:** the original four views, available for both studies. Their charts and the sentiment slider use VADER.
@@ -283,29 +284,75 @@ python -m venv .venv
 .venv/bin/streamlit run dashboard/app.py
 ```
 
+Both shipped studies are frozen: their TOMLs set `frozen = true`, `pipeline.py` refuses them, and every command that writes (pull, load and seed, preprocessing, sentiment, topics, aspect tagging, statistics, transformer scoring) refuses their files. Passing `--unfreeze-i-know` is the only way to regenerate a shipped study, and doing so rewrites committed databases. A refused command prints `error: ...` and exits with status 2.
+
 To rebuild the market study from the Steam API (about 1.5 hours of paced requests; cached pages are never pulled twice):
 
 ```bash
 S=studies/strategy_market_2026.toml
-.venv/bin/python src/data_pull.py --study $S
-.venv/bin/python src/db_setup.py --study $S --full
-.venv/bin/python src/preprocessing.py --study $S
-.venv/bin/python src/sentiment.py --study $S
-.venv/bin/python src/topics.py --study $S
-.venv/bin/python src/aspects.py --study $S
+U=--unfreeze-i-know
+.venv/bin/python src/data_pull.py --study $S $U
+.venv/bin/python src/db_setup.py --study $S --full $U
+.venv/bin/python src/preprocessing.py --study $S $U
+.venv/bin/python src/sentiment.py --study $S $U
+.venv/bin/python src/topics.py --study $S $U
+.venv/bin/python src/aspects.py --study $S $U
 # Transformer scores (downloads the pinned model weights once, under 3 GB; about 15 minutes on Apple MPS)
-.venv/bin/python src/sentiment_transformer.py score --study $S --units doc --models distilbert/distilbert-base-uncased-finetuned-sst-2-english
-.venv/bin/python src/sentiment_transformer.py score --study $S --units doc,sentence --models siebert/sentiment-roberta-large-english
-.venv/bin/python src/sentiment_transformer.py score --study studies/april_2026_baseline.toml --units doc
-.venv/bin/python src/sentiment_transformer.py validate --market $S --april studies/april_2026_baseline.toml
-.venv/bin/python src/sentiment_transformer.py audit-metrics --study $S
-.venv/bin/python src/stats.py --study $S
-.venv/bin/python src/stats.py --study $S --coverage
+.venv/bin/python src/sentiment_transformer.py score --study $S --units doc --models distilbert/distilbert-base-uncased-finetuned-sst-2-english $U
+.venv/bin/python src/sentiment_transformer.py score --study $S --units doc,sentence --models siebert/sentiment-roberta-large-english $U
+.venv/bin/python src/sentiment_transformer.py score --study studies/april_2026_baseline.toml --units doc $U
+.venv/bin/python src/sentiment_transformer.py validate --market $S --april studies/april_2026_baseline.toml $U
+.venv/bin/python src/sentiment_transformer.py audit-metrics --study $S $U
+.venv/bin/python src/stats.py --study $S $U
+.venv/bin/python src/stats.py --study $S --coverage $U
 ```
 
 These flags reproduce the committed state: document scores from both candidates, sentence scores from the selected model only. Scoring DistilBERT sentences as well would push the market seed past its size cap.
 
-Without `--study`, every command runs the April baseline exactly as before (`data_pull.py`, `db_setup.py --full`, `preprocessing.py`, `sentiment.py`, `topics.py`).
+Without `--study`, every command runs the April baseline as before (`data_pull.py`, `db_setup.py --full`, `preprocessing.py`, `sentiment.py`, `topics.py`); commands that write its files need `--unfreeze-i-know`.
+
+---
+
+## Run your own study
+
+Any set of Steam app IDs, grouped into cohorts, runs through the same pipeline. Three commands build a study end to end:
+
+```bash
+# 1. Write studies/indie_2026.toml with one cohort, then add a second cohort.
+#    --lookup fills names and genres from the public Steam store API (cached in data/raw/indie_2026/appdetails/).
+.venv/bin/python src/study_cli.py new --name indie_2026 --title "Indie action and farming games" \
+    --apps 1145360,367520 --cohort action --lookup
+.venv/bin/python src/study_cli.py add --study studies/indie_2026.toml --apps 413150 --cohort farming --lookup
+
+# 2. Pull, load, sample, preprocess, score VADER, fit topics, tag aspects and compute statistics.
+.venv/bin/python src/pipeline.py --study studies/indie_2026.toml --full
+
+# 3. Open the dashboard and pick the study in the sidebar.
+.venv/bin/streamlit run dashboard/app.py
+```
+
+Without `--lookup`, pass `--names "A|B"` and `--genre G`. `study_cli.py new` writes every sampling parameter into the study file, and each has a flag:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--filter` | `recent` | Steam sort order; `recent` pulls newest first |
+| `--language` | `english` | Steam review language |
+| `--purchase-type` | `all` | `all`, `steam` or `non_steam_purchase` |
+| `--raw-cap` | 20000 | Reviews pulled per game, newest first |
+| `--seed-cap` | 500 | Reviews per game in the uniform seed sample |
+| `--random-seed` | 42 | Seed for that sample |
+| `--window-start`, `--window-end` | none | Keep only reviews created in this date range (UTC, applied at load) |
+| `--review-type` | `all` | `positive` or `negative` only together with `--stratified` |
+| `--lexicon` | `studies/aspects_generic_v1.toml` | Aspect lexicon, or `''` for none |
+| `--min-topic-size`, `--umap-preset` | 40, `bertopic_default` | BERTopic settings |
+
+Natural sampling is the default: every review type is pulled, so each game keeps its real recommend rate. A study that filters on the recommend flag must say so with `--stratified`; the flag is recorded in `pull_runs`, and the dashboard then labels every recommend rate "design-fixed". The study file is plain TOML and can be edited by hand; `study.load_study` rejects a file with an app missing its cohort, a duplicate app ID, or a filtered review type without `stratified = true`.
+
+`pipeline.py` runs the stages in order and is idempotent: a second run with unchanged inputs changes no table. Pulled games are cached and never pulled twice, and rebuild stages (seed sample, aspect tagging, statistics) rerun only when their inputs change. Each stage reports `ran`, `no-op` (an idempotent stage that found nothing to do), `skipped` (a rebuild stage whose inputs are unchanged) or `not applicable`. Without `--full` it reruns the analysis on the existing seed, for example after editing the lexicon.
+
+`study_cli.py new` refuses a name whose seed, full database or raw directory belongs to another study or already exists; `--force` overrides that for your own studies, but never overwrites a frozen study's file or reuses its paths. `add` refuses a frozen study. The topics stage saves the fitted BERTopic model (about 92 MB) under `outputs/<study>/bertopic_model/`, which Git ignores.
+
+The generic lexicon (`bugs`, `performance`, `price`, `content`, `difficulty`, `ui`, `story`, `multiplayer`) is unaudited, and the dashboard says so: its aspect rows are descriptive until a study audits them with `src/aspects.py --study <file> --export-audit`, labels the exported sentences, imports them with `--import-labels`, and reruns the pipeline. Transformer sentiment scoring and its adoption test stay separate from the pipeline, so a new study reports VADER sentiment, and RoBERTa columns appear only where a validation run adopted the model (the market study). New full databases (`data/*_full.db`) and raw caches stay out of Git. A new study's seed (`data/<name>_seed.db`) is not ignored: if you commit it, it counts against the 25 MiB budget for committed databases, and the size test sums every `data/*_seed.db` with the April files.
 
 ---
 
@@ -315,7 +362,9 @@ Without `--study`, every command runs the April baseline exactly as before (`dat
 nlp_dashboard/
 ├── src/
 │   ├── utils.py                # Shared constants, paths, logger
-│   ├── study.py                # Study TOML loader
+│   ├── study.py                # Study TOML loader and validation
+│   ├── study_cli.py            # new/add commands that write study files
+│   ├── pipeline.py             # Runs every stage in order, idempotently
 │   ├── data_pull.py            # Steam API ingestion (April fixed pull, study census pull)
 │   ├── db_setup.py             # Schema, loading, April and natural seed builders
 │   ├── preprocessing.py        # Text cleaning, language filter (spaCy, lingua)
@@ -328,7 +377,8 @@ nlp_dashboard/
 ├── studies/
 │   ├── april_2026_baseline.toml
 │   ├── strategy_market_2026.toml
-│   └── aspects_strategy_v1.toml
+│   ├── aspects_strategy_v1.toml
+│   └── aspects_generic_v1.toml # Unaudited lexicon for any genre
 ├── dashboard/
 │   ├── app.py                  # Streamlit dashboard
 │   └── queries.py              # SQL query functions for dashboard views
@@ -337,7 +387,7 @@ nlp_dashboard/
 │   ├── seed_transformer_scores.db # April transformer scores (0.1 MiB)
 │   ├── market_seed.db          # Market study seed with transformer scores (19.7 MiB)
 │   └── labels/                 # Audit labeling guide and labels
-├── tests/                      # 148 tests covering pull, schema, NLP, statistics, sentiment validation, dashboard
+├── tests/                      # 188 tests covering pull, schema, study CLI, pipeline, frozen studies, NLP, statistics, sentiment validation, dashboard
 └── requirements.txt
 ```
 
@@ -349,4 +399,4 @@ The committed databases stay under 25 MB together: 23,080,960 bytes (22.0 MiB, 2
 
 - **Lexicon v2.** Rewrite the four failing aspects and audit them on fresh test-split sentences; `strategy_v1` stays the cited version.
 - **Sentence sentiment with a neutral class.** The sentence gate cannot be passed by a binary model whose probabilities never fall in the fixed neither band. It needs a three-class sentiment model or a neither band calibrated on labelled development sentences, then a fresh test audit.
-- **Broader tool.** Any set of Steam app IDs and cohorts from the command line, with a cohort comparison view.
+- **Transformer validation per study.** A dev and test comparison inside any study, so a new study can adopt a transformer scorer on its own evidence.

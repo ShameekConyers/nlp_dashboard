@@ -33,7 +33,14 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from src.db_setup import create_study_tables, create_tables
-from src.study import DEFAULT_STUDY_PATH, Study, load_study
+from src.study import (
+    DEFAULT_STUDY_PATH,
+    UNFREEZE_FLAG,
+    UNFREEZE_HELP,
+    Study,
+    guard_writable,
+    load_study,
+)
 from src.utils import (
     DETECTOR_LANGUAGES,
     LANGUAGE_MIN_CONFIDENCE,
@@ -457,6 +464,7 @@ def run(
     rebuild: bool = False,
     batch_size: int = 200,
     study: Study | None = None,
+    unfreeze: bool = False,
 ) -> None:
     """Run the full preprocessing pipeline against the chosen database.
 
@@ -480,12 +488,16 @@ def run(
             When the study sets ``language_filter``, non-English reviews
             become ``non_english`` sentinels and detections are written to
             ``review_language``.
+        unfreeze: Allow writing a frozen (shipped) study's database.
 
     Raises:
+        FrozenStudyError: If the database belongs to a frozen study and
+            ``unfreeze`` is False.
         ValueError: If `mode` is not 'seed' or 'full'.
         FileNotFoundError: If the target database does not exist.
     """
     db_path = get_db_path(mode) if study is None else get_db_path(mode, study)
+    guard_writable([db_path], unfreeze)
     use_language_filter = study is not None and study.language_filter
     if not db_path.exists():
         raise FileNotFoundError(
@@ -625,14 +637,20 @@ def main() -> None:
         default=DEFAULT_STUDY_PATH,
         help="Study TOML file (default: the April 2026 baseline).",
     )
+    parser.add_argument(UNFREEZE_FLAG, dest="unfreeze", action="store_true", help=UNFREEZE_HELP)
     args = parser.parse_args()
     study = load_study(args.study)
-    run(
-        mode="full" if args.full else "seed",
-        rebuild=args.rebuild,
-        batch_size=args.batch_size,
-        study=None if study.name == "april_2026_baseline" else study,
-    )
+    try:
+        run(
+            mode="full" if args.full else "seed",
+            rebuild=args.rebuild,
+            batch_size=args.batch_size,
+            study=None if study.name == "april_2026_baseline" else study,
+            unfreeze=args.unfreeze,
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(2)
 
 
 if __name__ == "__main__":
