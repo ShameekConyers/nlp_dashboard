@@ -7,6 +7,8 @@ data/raw/
 data/full.db
 data/market_full.db
 data/*_full.db
+# rtwp_turn_2026 ships local only: seed, full DB, raw cache and pull logs
+data/rtwp_turn_2026/
 studies/*.toml.tmp
 
 # Private planning documents

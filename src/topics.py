@@ -342,11 +342,15 @@ def model_path_for(study: Study | None) -> Path:
         study: The study, or None for the April baseline.
 
     Returns:
-        ``outputs/bertopic_model/model.pkl`` for the April baseline, otherwise
-        ``outputs/<study name>/bertopic_model/model.pkl``.
+        ``outputs/bertopic_model/model.pkl`` for the April baseline,
+        ``outputs/<study name>/bertopic_model_full_<split>/model.pkl`` for the
+        analysis view of a ``stats_source = "full"`` study (so the seed's
+        model is kept), otherwise ``outputs/<study name>/bertopic_model/model.pkl``.
     """
     if study is None or study.name == "april_2026_baseline":
         return OUTPUTS_DIR / "bertopic_model" / "model.pkl"
+    if study.stats_source == "full" and study.seed_db == study.analysis_db:
+        return OUTPUTS_DIR / study.name / f"bertopic_model_full_{study.stats_split}" / "model.pkl"
     return OUTPUTS_DIR / study.name / "bertopic_model" / "model.pkl"
 
 

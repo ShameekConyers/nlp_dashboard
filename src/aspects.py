@@ -20,7 +20,7 @@ import re
 import sqlite3
 import sys
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import spacy
@@ -96,10 +96,20 @@ class Lexicon:
     Attributes:
         version: Lexicon version written with every mention.
         aspects: Aspects in file order.
+        full_db_audit: Aspects whose audit sentences come from the full
+            database's test split (``full_db_audit`` in ``[lexicon]``), added
+            to ``FULL_DB_AUDIT_ASPECTS``. Empty unless the file names some.
+        revised: Aspects this version changed after an audit of ``supersedes``
+            (``revised`` in ``[lexicon]``). When set, the audit export covers
+            only these aspects and skips every review of the earlier export.
+        supersedes: Version whose audit this one retries (``supersedes``).
     """
 
     version: str
     aspects: tuple[Aspect, ...]
+    full_db_audit: tuple[str, ...] = ()
+    revised: tuple[str, ...] = ()
+    supersedes: str | None = None
 
 
 @dataclass(frozen=True)
@@ -125,6 +135,10 @@ def load_lexicon(path: Path) -> Lexicon:
 
     Returns:
         The compiled Lexicon.
+
+    Raises:
+        ValueError: If ``full_db_audit`` or ``revised`` names an aspect the file
+            does not define, or only one of ``revised`` and ``supersedes`` is set.
     """
     with open(path, "rb") as f:
         raw = tomllib.load(f)
@@ -138,7 +152,22 @@ def load_lexicon(path: Path) -> Lexicon:
         )
         for a in raw["aspects"]
     )
-    return Lexicon(version=raw["lexicon"]["version"], aspects=aspects)
+    names = {a.name for a in aspects}
+    full_db_audit = tuple(raw["lexicon"].get("full_db_audit", []))
+    unknown = sorted(set(full_db_audit) - names)
+    if unknown:
+        raise ValueError(f"full_db_audit names unknown aspects {unknown} in {path}.")
+    revised = tuple(raw["lexicon"].get("revised", []))
+    supersedes = raw["lexicon"].get("supersedes")
+    unknown = sorted(set(revised) - names)
+    if unknown:
+        raise ValueError(f"revised names unknown aspects {unknown} in {path}.")
+    if bool(revised) != bool(supersedes):
+        raise ValueError(f"revised and supersedes must be set together in {path}.")
+    return Lexicon(
+        version=raw["lexicon"]["version"], aspects=aspects, full_db_audit=full_db_audit,
+        revised=revised, supersedes=supersedes,
+    )
 
 
 def tag_sentences(sentences: list[str], lexicon: Lexicon) -> list[AspectMatch]:
@@ -310,10 +339,53 @@ def audit_paths(study: Study, lexicon: Lexicon) -> tuple[Path, Path]:
     Returns:
         ``(unlabeled_csv, committed_labels_csv)``.
     """
-    return (
-        OUTPUTS_DIR / "audit" / f"{study.name}_aspect_audit_{lexicon.version}_unlabeled.csv",
-        DATA_DIR / "labels" / f"aspect_audit_{lexicon.version}.csv",
-    )
+    return audit_export_path(study, lexicon.version), label_path(lexicon.version)
+
+
+def audit_export_path(study: Study, version: str) -> Path:
+    """Return the unlabeled audit CSV a lexicon version's export writes.
+
+    Args:
+        study: The study.
+        version: Lexicon version.
+
+    Returns:
+        ``outputs/audit/<study>_aspect_audit_<version>_unlabeled.csv``.
+    """
+    return OUTPUTS_DIR / "audit" / f"{study.name}_aspect_audit_{version}_unlabeled.csv"
+
+
+def label_path(version: str) -> Path:
+    """Return the committed label file of a lexicon version's audit.
+
+    Args:
+        version: Lexicon version.
+
+    Returns:
+        ``data/labels/aspect_audit_<version>.csv``.
+    """
+    return DATA_DIR / "labels" / f"aspect_audit_{version}.csv"
+
+
+def audit_review_ids(path: Path) -> set[str]:
+    """Read the review IDs of an audit export, and nothing else.
+
+    Only the ``steam_review_id`` column is kept. Sentence text is parsed by the
+    CSV reader but never stored or returned.
+
+    Args:
+        path: An audit export written by ``export_audit``.
+
+    Returns:
+        The distinct review IDs.
+
+    Raises:
+        FileNotFoundError: If the export does not exist.
+    """
+    with open(path, encoding="utf-8", newline="") as f:
+        reader = csv.reader(f)
+        col = next(reader).index("steam_review_id")
+        return {row[col] for row in reader}
 
 
 def full_db_mentions(
@@ -374,8 +446,13 @@ def export_audit(study: Study, per_aspect: int = AUDIT_PER_ASPECT) -> Path:
     Draws up to ``per_aspect`` sentences per aspect from the test split,
     at most one sentence per review per aspect, in a seeded random order
     (one RNG per aspect, seeded from ``AUDIT_RANDOM_SEED`` and the aspect
-    name). Aspects in ``FULL_DB_AUDIT_ASPECTS`` draw from the full database's
-    test split; the rest from the seed's.
+    name). Aspects in ``FULL_DB_AUDIT_ASPECTS`` or the lexicon's
+    ``full_db_audit`` draw from the full database's test split; the rest from
+    the seed's. A study with ``stats_source = "full"`` draws every aspect from
+    the full database's test split, since its statistics no longer use the
+    seed. A lexicon with ``revised`` and ``supersedes`` exports only the
+    revised aspects and skips every review in the superseded version's export,
+    so the retry audit shares no review with the first one.
 
     Args:
         study: A study whose aspect stage has run.
@@ -383,10 +460,26 @@ def export_audit(study: Study, per_aspect: int = AUDIT_PER_ASPECT) -> Path:
 
     Returns:
         Path to the unlabeled CSV.
+
+    Raises:
+        FileNotFoundError: If the superseded version's export is missing.
     """
     assert study.aspect_lexicon is not None
     lexicon = load_lexicon(study.aspect_lexicon)
     out_path, _ = audit_paths(study, lexicon)
+    audited = frozenset(lexicon.revised or (a.name for a in lexicon.aspects))
+    excluded: set[str] = set()
+    if lexicon.supersedes:
+        prior = replace(lexicon, version=lexicon.supersedes)
+        excluded = audit_review_ids(audit_paths(study, prior)[0])
+        logger.info("Excluding %d reviews of the %s audit export.", len(excluded), prior.version)
+
+    def keep(rows: list[tuple[str, str, int, str]]) -> list[tuple[str, str, int, str]]:
+        return [r for r in rows if r[1] in audited and r[0] not in excluded]
+
+    if study.stats_source == "full":
+        rows = full_db_mentions(study, lexicon, audited)
+        return _write_audit(lexicon, keep(rows), out_path, per_aspect)
     conn = sqlite3.connect(study.seed_db)
     try:
         rows = conn.execute(
@@ -403,9 +496,26 @@ def export_audit(study: Study, per_aspect: int = AUDIT_PER_ASPECT) -> Path:
         ).fetchall()
     finally:
         conn.close()
-    rows = [r for r in rows if r[1] not in FULL_DB_AUDIT_ASPECTS]
-    rows += full_db_mentions(study, lexicon, FULL_DB_AUDIT_ASPECTS)
+    from_full = (FULL_DB_AUDIT_ASPECTS | frozenset(lexicon.full_db_audit)) & audited
+    rows = [r for r in rows if r[1] not in from_full]
+    rows += full_db_mentions(study, lexicon, from_full)
+    return _write_audit(lexicon, keep(rows), out_path, per_aspect)
 
+
+def _write_audit(
+    lexicon: Lexicon, rows: list[tuple[str, str, int, str]], out_path: Path, per_aspect: int
+) -> Path:
+    """Draw the audit sentences from tagged rows and write the unlabeled CSV.
+
+    Args:
+        lexicon: The lexicon being audited.
+        rows: ``(steam_review_id, aspect, sentence_idx, sentence)`` rows.
+        out_path: Destination CSV.
+        per_aspect: Maximum sentences per aspect.
+
+    Returns:
+        ``out_path``.
+    """
     chosen: list[tuple[str, str, int, str]] = []
     for aspect in lexicon.aspects:
         seen: set[str] = set()
@@ -416,6 +526,9 @@ def export_audit(study: Study, per_aspect: int = AUDIT_PER_ASPECT) -> Path:
                 pool.append((rid, name, idx, text))
         random.Random(f"{AUDIT_RANDOM_SEED}:{aspect.name}").shuffle(pool)
         chosen.extend(pool[:per_aspect])
+        if pool:
+            logger.info("Audit %s: %d eligible reviews, %d drawn.", aspect.name, len(pool),
+                        min(len(pool), per_aspect))
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     labels = {a.name: a.label for a in lexicon.aspects}
@@ -485,7 +598,7 @@ def main() -> None:
         elif args.export_audit:
             export_audit(study)
         else:
-            run(study, unfreeze=args.unfreeze)
+            run(study.analysis_view(), unfreeze=args.unfreeze)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         sys.exit(2)

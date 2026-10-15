@@ -518,3 +518,19 @@ def test_run_aborts_if_no_nlp_results_rows(
         run(mode="seed")
 
     assert "No nlp_results rows found" in caplog.text
+
+
+def test_full_source_view_saves_its_model_apart_from_the_seed_model(tmp_path) -> None:  # noqa: ANN001
+    """The seed's model file is kept when a study moves its stats to the full database."""
+    from dataclasses import replace
+
+    from src.study import STUDIES_DIR, load_study
+    from src.topics import model_path_for
+
+    study = replace(load_study(STUDIES_DIR / "strategy_market_2026.toml"),
+                    full_db=tmp_path / "f.db", stats_split="dev", stats_source="full")
+    seed_path = model_path_for(study)
+    assert seed_path.parent.name == "bertopic_model"
+    assert model_path_for(study.analysis_view()).parent.name == "bertopic_model_full_dev"
+    plain = load_study(STUDIES_DIR / "strategy_market_2026.toml")
+    assert model_path_for(plain) == seed_path

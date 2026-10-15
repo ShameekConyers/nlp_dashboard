@@ -289,7 +289,7 @@ def run(
         4. Fetch unscored rows, score with SentimentScorer, write to
            nlp_results.
         5. For kept reviews (token_count >= MIN_TOKEN_COUNT), run validation
-           and log metrics.
+           and log metrics; for a study with ``stats_split``, on that split only.
 
     Args:
         mode: 'seed' or 'full'.
@@ -370,7 +370,7 @@ def run(
         # Validation on kept reviews only
         validation_rows = conn.execute(
             """
-            SELECT n.sentiment_compound, d.recommended
+            SELECT n.sentiment_compound, d.recommended, d.steam_review_id
             FROM nlp_results n
             JOIN processed_documents p ON n.document_id = p.document_id
             JOIN documents d ON n.document_id = d.id
@@ -378,6 +378,14 @@ def run(
             """,
             (MIN_TOKEN_COUNT,),
         ).fetchall()
+        split = study.stats_split if study is not None else None
+        if split is not None:
+            # A study restricted to one split never scores the other split's flags.
+            from src.stats import dev_test_split
+
+            validation_rows = [r for r in validation_rows if dev_test_split(r[2]) == split]
+            logger.info("Validation restricted to the %s split (%d reviews).", split,
+                        len(validation_rows))
 
         if validation_rows:
             compounds = [row[0] for row in validation_rows]

@@ -1,0 +1,175 @@
+# Phrase lexicon for combat-model themes in CRPG and strategy reviews.
+#
+# Each aspect lists case-insensitive regular expressions. A sentence is tagged
+# with an aspect when any include pattern matches and no exclude pattern does.
+# Design aspects describe real-time-with-pause (RTwP) and turn-based (TB)
+# combat. Control aspects (copied unchanged from strategy_v1) size them
+# against the usual review drivers. Iterated on the dev split only, in two
+# passes (2026-10-15): pass 1 on the study seed, pass 2 on dev-split reviews of
+# the full database for the rare aspects (waiting_turns, realtime_chaos,
+# combat_pacing). Frozen as rtwp_turn_v1 on 2026-10-15. Changes after this
+# point need a new version and a fresh test-split audit.
+#
+# [lexicon] full_db_audit names aspects whose audit sentences come from the
+# full database's test split because the seed's test split holds fewer than 30.
+
+[lexicon]
+version = "rtwp_turn_v1"
+full_db_audit = ["realtime_chaos", "waiting_turns", "combat_pacing"]
+
+[[aspects]]
+name = "mode_turn_based"
+kind = "design"
+label = "Turn-based combat or mode talk"
+include = [
+    '\bturn[- ]?bas(ed|e)\b',
+    '\btbm\b',
+    '\btb\s+(mode|combat|version|option)\b',
+    '\bwe-?go\b',
+]
+exclude = []
+
+[[aspects]]
+name = "mode_rtwp"
+kind = "design"
+label = "Real-time-with-pause combat or mode talk"
+include = [
+    '\breal[- ]?time[- ]?with[- ]?pause\b',
+    '\brtwp\b',
+    '\breal[- ]?time\s+(combat|mode|battles?|fights?|tactics|version|option|system)\b',
+    '\bpausable\s+real[- ]?time\b',
+]
+exclude = []
+
+[[aspects]]
+name = "pause_micro"
+kind = "design"
+label = "Pausing and micromanagement"
+include = [
+    '\b(auto|tactical|active|smart)[- ]?paus\w*\b',
+    '\bpaus(e|ing|ed)\b.{0,40}\b(combat|fights?|battles?|every|constantly|all the time|issue|orders?|commands?)\b',
+    '\b(combat|fights?|battles?|every|constantly|spam\w*)\b.{0,40}\bpaus(e|ing|ed)\b',
+    '\bmicro[- ]?(manag\w*|ing)\b',
+    '\bbabysit\w*\b',
+]
+exclude = [
+    '\bpause\s+(menu|screen)\b',
+]
+
+[[aspects]]
+name = "realtime_chaos"
+kind = "design"
+label = "Real-time chaos and readability"
+include = [
+    '\b(combat|fights?|battles?|encounters|melee|skirmish\w*)\b[^.;]{0,40}\b(chao(s|tic)|(a|the|pure|utter|total|chaotic|absolute|blurry|hot|big|complete)\s+mess|messy|clusterf\w*|hectic|unreadable)\b',
+    '\b(chao(s|tic)|messy|clusterf\w*|hectic|unreadable)\b[^.;]{0,40}\b(combat|fights?|battles?|encounters|melee)\b',
+    '\breal[- ]?time\s+(chaos|mess)\b',
+    '\b(no idea|hard to tell|can[\x27’]?t tell|cannot tell|impossible to tell|hard to follow)\s+(what|who)[\x27’]?s?\s*(is\s+)?(going on|happening|doing)\b[^.;]{0,40}\b(combat|fights?|battles?|encounters?)\b',
+    '\b(combat|fights?|battles?|encounters?)\b[^.;]{0,40}\b(no idea|hard to tell|can[\x27’]?t tell|cannot tell|impossible to tell|hard to follow)\s+(what|who)\b',
+    '\b(blob|blobs|blobbing)\b.{0,30}\b(combat|fights?|units|enemies|party|melee|battles?)\b',
+]
+exclude = [
+    '\bchaos\s+(space\s+)?(marines?|gods?|daemons?|demons?|cult\w*|factions?|undivided|lords?|sorcerers?|spawn|warriors?|knights?|realms?|bolt|magic|dwarfs?|dwarves|champions?|tome|affinity)\b',
+    '\b(forces|servants|followers|powers|gods|god|lord|realm|ruinous powers|agents)\s+of\s+chaos\b',
+    '\bchaotic\s+(good|evil|neutral|stupid|alignment)\b',
+    '\b(order|law)\W+(and|vs\.?|versus|or)\W+chaos\b',
+]
+
+[[aspects]]
+name = "waiting_turns"
+kind = "design"
+label = "Waiting through turns"
+include = [
+    '\b(ai|enemy|enemies|computer|opponents?|cpu|npc)([\x27’]s?)?\s+(turns?|phases?|moves?)\b.{0,50}\b(long|longer|slow|slower|forever|ages|minutes|wait\w*|drag(s|ged|ging)?|takes? (so )?(long|forever|ages))\b',
+    '\b(long|longer|slow|lengthy|endless)\s+(ai|enemy|end|cpu|computer|npc)[- ]?(turns?|phases?)\b',
+    '\bwait\w*\b.{0,30}\b(for|through|on)\s+(the\s+)?(ai|enemy|enemies|computer|opponents?|cpu|npcs?|my|your|their|everyone|every)\w*\b.{0,30}\b(turns?(?![- ]?bas)|moves?|movement|finish\w*|phases?)\b',
+    '\bturn\s+(processing|times?|resolution)\b',
+    '\bturns?\s+(take|takes|took|taking)\s+(so\s+|too\s+|way\s+too\s+)?(long|forever|ages|minutes)\b',
+    '\bend[- ]?turns?\b.{0,40}\b(long|slow|forever|minutes|ages|wait\w*)\b',
+    '\b(skip|speed up|fast[- ]?forward)\w*\b.{0,30}\b(ai|enemy|enemies|opponent|npc)\w*\s*(turns?|moves?|movement|animations?|phases?)\b',
+    '\bwatch(ing)?\s+(the\s+)?(ai|enemy|enemies|npcs?|opponents?)\s+(move|moving|take|taking)\b',
+]
+exclude = [
+    '\b(can[\x27’]?t|cannot|eagerly|excited\s+to|impatiently)\s+wait\w*\b',
+    '\bwait\w*\s+for\s+my\s+turn\s+on\s+the\s+(computer|pc)\b',
+    '\bwait\w*\s+(for|until)\s+(a|the|an|another)?\s*(sale|discount|dlc|patch|update|sequel|release|fix|expansion|next)\b',
+]
+
+[[aspects]]
+name = "combat_pacing"
+kind = "design"
+label = "Combat pacing and encounter length"
+include = [
+    '\b(combat|fights?|battles?|encounters?)\b[^,.;]{0,30}\b(drag(s|ged|ging)?|slow|sluggish|tedious|take (so )?(long|forever)|takes? (so )?(long|forever|ages)|too long|lengthy)\b',
+    '\b(long|lengthy|tedious|slow|endless)\s+(combat|fights?|battles?|encounters?)\b',
+    '\btoo\s+many\s+(fights?|battles?|encounters?|trash)\b',
+    '\btrash\s+(fights?|encounters?)\b',
+    '\bfiller\s+(fights?|combat|encounters?)\b',
+]
+exclude = []
+
+[[aspects]]
+name = "bugs_performance"
+kind = "control"
+label = "Bugs and performance"
+include = [
+    '\bbugs?\b',
+    '\bbuggy\b',
+    '\bcrash\w*\b',
+    '\bglitch\w*\b',
+    '\bperformance\b',
+    '\bfps\b',
+    '\bframe[- ]?rates?\b',
+    '\bstutter\w*\b',
+    '\blag(gy|s|ging)?\b',
+    '\bfreez\w*\b',
+    '\bloading\s+(times?|screens?)\b',
+    '\bunoptimi[sz]ed\b',
+    '\boptimi[sz]ation\b',
+    '\bsoft[- ]?lock\w*\b',
+]
+exclude = [
+    '\b(kill|killing|squish\w*|squash\w*|shoot\w*|fight\w*|stomp\w*|punch\w*)\s+(the\s+|giant\s+|alien\s+|space\s+)?bugs?\b',
+    '\b(giant|alien|space|evil)\s+bugs?\b',
+    '\bbugs?\s+(threaten\w*|attack\w*|spawn\w*|emerg\w*|burrow\w*)\b',
+    '\bmechs?\s+(vs\.?|versus|against)\s+bugs\b',
+]
+
+[[aspects]]
+name = "ui_clarity"
+kind = "control"
+label = "UI and interface"
+include = [
+    '\bui\b',
+    '\buser\s+interface\b',
+    '\binterface\b',
+    '\bmenus?\b',
+    '\btool[- ]?tips?\b',
+    '\bhud\b',
+]
+exclude = []
+
+[[aspects]]
+name = "price_dlc"
+kind = "control"
+label = "Price and DLC"
+include = [
+    '\bprices?\b',
+    '\bpriced\b',
+    '\bpricing\b',
+    '\bdlcs?\b',
+    '\bexpensive\b',
+    '\bon\s+sale\b',
+    '\bfull\s+price\b',
+    '\bdiscount\w*\b',
+    '\bmicro[- ]?transactions?\b',
+    '\bcash[- ]?grab\b',
+    '\bseason\s+pass\b',
+    '\bpaywall\w*\b',
+    '\bworth\s+(the\s+)?(money|price|cost)\b',
+]
+exclude = [
+    '\bat\s+the\s+(price|cost)\s+of\b',
+    '\b(small|steep|high)\s+price\s+to\s+pay\b',
+    '\bprice\s+to\s+pay\b',
+]

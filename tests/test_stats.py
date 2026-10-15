@@ -294,3 +294,248 @@ def test_run_uses_adopted_transformer_for_sentiment_views(
     assert cohort[0] is not None and cohort[1] is not None
     assert theme[0] == pytest.approx(theme[1])
     assert params["sentiment_model"]["model_name"] == "m/x"
+
+
+# ---------------------------------------------------------------------------
+# Split restriction, cohort-subgroup scopes and export
+# ---------------------------------------------------------------------------
+
+
+def _split_seed(tmp_path: Path, name: str, drop_test: bool) -> Study:
+    """Write a three-game seed, optionally without its test-split reviews.
+
+    Each game has 300 kept reviews, 90 not recommended; one in three
+    mentions the map topic. Steam IDs are shared between the two variants, so
+    the dev rows are identical.
+
+    Args:
+        tmp_path: pytest temporary directory.
+        name: Subdirectory and study name.
+        drop_test: Leave out reviews in the test split.
+
+    Returns:
+        A dev-split Study on the seed.
+    """
+    from dataclasses import replace
+
+    (tmp_path / name).mkdir()
+    base = _make_seed(tmp_path / name)
+    study = replace(base, name=name, stats_split="dev",
+                    apps=tuple(a for a in base.apps if a.app_id != 4))
+    conn = sqlite3.connect(study.seed_db)
+    conn.execute("DELETE FROM nlp_results")
+    conn.execute("DELETE FROM processed_documents")
+    conn.execute("DELETE FROM documents")
+    rid = 0
+    for app_id in (1, 2, 3):
+        for i in range(300):
+            rid += 1
+            if drop_test and dev_test_split(str(rid)) == "test":
+                continue
+            rec = i >= 90
+            text = "The maps are great." if i % 3 == 0 else "Solid tactics overall."
+            doc_id = conn.execute(
+                "INSERT INTO documents (steam_review_id, app_id, review_text, recommended) "
+                "VALUES (?, ?, ?, ?)", (str(rid), app_id, text, rec),
+            ).lastrowid
+            conn.execute("INSERT INTO processed_documents VALUES (?, ?, '[]', 5, ?, NULL)",
+                         (doc_id, text, len(text)))
+            conn.execute(
+                "INSERT INTO nlp_results (document_id, sentiment_compound, topic_id) "
+                "VALUES (?, ?, ?)", (doc_id, 0.5 if rec else -0.5, 0 if i % 3 == 0 else -1),
+            )
+    conn.commit()
+    conn.close()
+    return study
+
+
+def _rows(study: Study, run_id: int, sql: str) -> list[tuple]:
+    conn = sqlite3.connect(study.seed_db)
+    try:
+        return conn.execute(sql, (run_id,)).fetchall()
+    finally:
+        conn.close()
+
+
+def test_dev_split_stats_ignore_test_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A dev-split run on the whole seed equals a run on a seed holding only dev rows."""
+    from src.aspects import run as run_aspects
+
+    monkeypatch.setattr("src.aspects.DATA_DIR", tmp_path)
+    whole = _split_seed(tmp_path, "whole", drop_test=False)
+    dev_only = _split_seed(tmp_path, "devonly", drop_test=True)
+    results = []
+    for study in (whole, dev_only):
+        run_aspects(study)
+        run_id = run(study, n_boot=50)
+        game = _rows(study, run_id, "SELECT * FROM game_stats WHERE run_id = ? ORDER BY app_id")
+        theme = _rows(study, run_id, "SELECT * FROM theme_stats WHERE run_id = ? "
+                      "ORDER BY lens, theme, scope_type, scope_id")
+        metrics = json.loads(_rows(study, run_id, "SELECT metrics FROM analysis_runs "
+                                   "WHERE run_id = ?")[0][0])
+        results.append(([g[1:] for g in game], [t[1:] for t in theme], metrics))
+
+    (g_whole, t_whole, m_whole), (g_dev, t_dev, m_dev) = results
+    assert g_whole == g_dev
+    assert t_whole == t_dev
+    assert m_whole["vader_validation"] == m_dev["vader_validation"]
+    assert m_whole["vader_validation"]["split"] == "dev"
+    assert m_whole["stats_split"] == "dev"
+    assert m_whole["n_kept"] == m_dev["n_kept"] < 900
+    assert m_whole["eligible_app_ids"] == [1, 2, 3]
+
+
+def test_cohort_subgroup_scopes_only_for_shared_subgroups() -> None:
+    from dataclasses import replace
+
+    from src.stats import SCOPE_COHORT_SUBGROUP, _scopes
+
+    apps = (
+        AppSpec(1, "A", "G", "crpg", "rtwp", ()), AppSpec(2, "B", "G", "crpg", "turn_based", ()),
+        AppSpec(3, "C", "G", "strategy", "rtwp", ()), AppSpec(4, "D", "G", "strategy", "turn_based", ()),
+        AppSpec(5, "E", "G", "dual", "", ()), AppSpec(6, "F", "G", "other", "solo", ()),
+    )
+    study = Study(
+        name="x", title="t", seed_db=Path("s"), full_db=Path("f"), raw_dir=Path("r"),
+        language_filter=True, aspect_lexicon=None,
+        sampling=Sampling("natural", "recent", "english", "all", "all", 1, 100, 100, 100, 42),
+        baseline=None, apps=apps,
+    )
+    scopes = {(t, i): (ids, el) for t, i, ids, el in _scopes(study, {1, 3}, {1, 3})}
+    shared = {i for t, i in scopes if t == SCOPE_COHORT_SUBGROUP}
+    assert shared == {"crpg/rtwp", "crpg/turn_based", "strategy/rtwp", "strategy/turn_based"}
+    assert scopes[(SCOPE_COHORT_SUBGROUP, "crpg/rtwp")] == ([1], [1])
+    assert scopes[("subgroup", "rtwp")] == ([1, 3], [1, 3])
+
+    unique = replace(study, apps=tuple(a for a in apps if a.cohort in ("crpg", "other")))
+    assert not [s for s in _scopes(unique, set(), set()) if s[0] == SCOPE_COHORT_SUBGROUP]
+
+
+def test_export_run_writes_metrics_and_tables(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import csv
+
+    from src.aspects import run as run_aspects
+    from src.stats import export_run
+
+    monkeypatch.setattr("src.aspects.DATA_DIR", tmp_path)
+    study = _make_seed(tmp_path)
+    run_aspects(study)
+    run_id = run(study, n_boot=20)
+    before = (tmp_path / "seed.db").read_bytes()
+    path = export_run(study, tmp_path / "out")
+    assert json.loads(path.read_text())["run_id"] == run_id
+    with open(tmp_path / "out" / f"theme_stats_run_{run_id}.csv", newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert rows and {r["run_id"] for r in rows} == {str(run_id)}
+    assert (tmp_path / "out" / f"game_stats_run_{run_id}.csv").exists()
+    assert (tmp_path / "seed.db").read_bytes() == before
+
+
+def test_candidate_run_assumes_precision_on_a_copy_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Candidates may contain aspect findings; the study seed gains no run."""
+    from src.aspects import run as run_aspects
+    from src.stats import candidate_run
+
+    monkeypatch.setattr("src.aspects.DATA_DIR", tmp_path)
+    study = _make_seed(tmp_path)
+    run_aspects(study)
+    before = (tmp_path / "seed.db").read_bytes()
+    path = candidate_run(study, tmp_path / "cand", n_boot=30)
+    data = json.loads(path.read_text())
+    assert data["metrics"]["precision_assumed"] is True
+    assert all(v["passes"] and v["assumed"] for v in data["metrics"]["aspect_precision"].values())
+    with open(tmp_path / "cand" / f"candidates_theme_stats_run_{data['run_id']}.csv") as f:
+        import csv
+        rows = [r for r in csv.DictReader(f) if r["lens"] == "aspect" and r["scope_type"] == "cohort"]
+    assert rows and all(r["logo_stable"] != "" for r in rows)
+    assert (tmp_path / "seed.db").read_bytes() == before
+    # A second call overwrites the copy instead of stacking runs on it.
+    assert json.loads(candidate_run(study, tmp_path / "cand", n_boot=30).read_text())["run_id"] == 1
+
+
+def _merge_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, governs: tuple = (
+    ("a", "lx_v3"), ("b", "lx_v3"), ("c", "lx_v2"),
+)):
+    """A synthetic retry: a and b revised in lx_v3, c unchanged from lx_v2."""
+    from dataclasses import replace
+
+    from src.aspects import Aspect, Lexicon
+
+    monkeypatch.setattr("src.aspects.DATA_DIR", tmp_path / "data")
+    (tmp_path / "data" / "labels").mkdir(parents=True)
+    lexicon = Lexicon("lx_v3", tuple(Aspect(n, "design", n, (), ()) for n in "abc"),
+                      revised=("a", "b"), supersedes="lx_v2")
+    sampling = Sampling("natural", "recent", "english", "all", "all", 1, 100, 100, 100, 1)
+    study = Study(name="m", title="t", seed_db=tmp_path / "s.db", full_db=tmp_path / "f.db",
+                  raw_dir=tmp_path, language_filter=False, aspect_lexicon=None,
+                  sampling=sampling, baseline=None, apps=())
+    return replace(study, aspect_labels=governs), lexicon, tmp_path / "data" / "labels"
+
+
+def _label_file(path: Path, relevant: dict[str, int], n: int = 40) -> None:
+    rows = ["steam_review_id,sentence_idx,aspect,label"]
+    for aspect, rel in relevant.items():
+        rows += [f"{aspect}{i},0,{aspect},{'relevant' if i < rel else 'not_relevant'}"
+                 for i in range(n)]
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+
+def test_study_precision_takes_each_aspect_from_its_governing_label_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.stats import study_precision
+
+    study, lexicon, labels = _merge_setup(tmp_path, monkeypatch)
+    # The earlier audit also labeled a and b (both failed). Those rows must not count.
+    _label_file(labels / "aspect_audit_lx_v2.csv", {"a": 10, "b": 10, "c": 36})
+    _label_file(labels / "aspect_audit_lx_v3.csv", {"a": 38, "b": 20, "c": 0})
+    got = study_precision(study, lexicon, required=True)
+    assert list(got) == ["a", "b", "c"]
+    assert {a: (p["label_version"], p["relevant"], p["passes"]) for a, p in got.items()} == {
+        "a": ("lx_v3", 38, True), "b": ("lx_v3", 20, False), "c": ("lx_v2", 36, True),
+    }
+
+
+def test_study_precision_fails_on_a_missing_file_once_labels_are_required(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.stats import study_precision
+
+    study, lexicon, labels = _merge_setup(tmp_path, monkeypatch)
+    _label_file(labels / "aspect_audit_lx_v2.csv", {"c": 36})
+    pending = study_precision(study, lexicon)
+    assert list(pending) == ["c"] and pending["c"]["label_version"] == "lx_v2"
+    with pytest.raises(FileNotFoundError, match="aspect_audit_lx_v3.csv"):
+        study_precision(study, lexicon, required=True)
+    _label_file(labels / "aspect_audit_lx_v3.csv", {"a": 38})
+    with pytest.raises(ValueError, match=r"\['b'\] have no rows"):
+        study_precision(study, lexicon, required=True)
+
+
+@pytest.mark.parametrize(("governs", "match"), [
+    ((("a", "lx_v3"), ("b", "lx_v3")), "have no governing label file"),
+    ((("a", "lx_v3"), ("b", "lx_v3"), ("c", "lx_v2"), ("d", "lx_v2")), "does not define"),
+    ((("a", "lx_v3"), ("b", "lx_v2"), ("c", "lx_v2")), "revised in lx_v3"),
+])
+def test_study_precision_rejects_a_bad_declaration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, governs: tuple, match: str
+) -> None:
+    from src.stats import study_precision
+
+    study, lexicon, _ = _merge_setup(tmp_path, monkeypatch, governs)
+    with pytest.raises(ValueError, match=match):
+        study_precision(study, lexicon)
+
+
+def test_rtwp_study_declares_v3_labels_for_revised_aspects_and_v2_for_the_rest() -> None:
+    from src.aspects import load_lexicon
+    from src.study import load_study
+
+    study = load_study(PROJECT_ROOT / "studies" / "rtwp_turn_2026.toml")
+    lexicon = load_lexicon(study.aspect_lexicon)
+    governs = study.label_versions()
+    assert set(governs) == {a.name for a in lexicon.aspects}
+    assert {a for a, v in governs.items() if v == lexicon.version} == set(lexicon.revised)
+    assert {v for a, v in governs.items() if a not in lexicon.revised} == {lexicon.supersedes}

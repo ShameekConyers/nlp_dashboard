@@ -1,0 +1,289 @@
+# Real-time-with-pause (RTwP) versus turn-based (TB) combat, phase A (exploratory).
+#
+# Cohorts: crpg and strategy, each with subgroups rtwp and turn_based. dual_mode
+# holds games that ship both modes and is analysed on its own. Every app ID was
+# checked with study_cli --lookup and every combat-model classification and
+# mode-addition date against a first-party page. The evidence table is in
+# docs/rtwp_turn_study_design.md. Tags: dual_mode marks the subslice,
+# mode_added a TB mode added after launch (date in [[mode_events]]),
+# both_at_launch a game that shipped both modes, swap_in a candidate replaced
+# with a better-matched game (see the design doc).
+#
+# Data stays local: everything under data/rtwp_turn_2026/ is ignored by Git.
+
+[study]
+name = "rtwp_turn_2026"
+title = "Real-time-with-pause versus turn-based combat"
+seed_db = "data/rtwp_turn_2026/rtwp_turn_2026_seed.db"
+full_db = "data/rtwp_turn_2026/rtwp_turn_2026_full.db"
+raw_dir = "data/rtwp_turn_2026/raw/rtwp_turn_2026"
+language_filter = true
+aspect_lexicon = "studies/aspects_rtwp_turn_v3.toml"
+# Phase A: every outcome statistic uses the development half of the hash split.
+stats_split = "dev"
+# Statistics run on that half of the full database, copied into
+# data/rtwp_turn_2026/rtwp_turn_2026_full_dev.db, not on the seed (Oct 15 2026).
+stats_source = "full"
+
+[sampling]
+method = "natural"            # census pull, uniform per-game seed sample
+filter = "recent"             # creation-date order, newest first
+language = "english"
+review_type = "all"           # never positive/negative: that would stratify
+purchase_type = "all"
+filter_offtopic_activity = 1
+num_per_page = 100
+raw_cap_per_game = 10000      # dual-mode titles override this with raw_cap = 20000
+seed_cap_per_game = 500
+random_seed = 42
+
+[baseline]                    # population check (num_per_page=0)
+language = "all"
+purchase_type = "all"
+
+[topics]
+umap_preset = "bertopic_default"
+min_topic_size = 40
+
+# Which audit's labels govern each aspect's precision (docs/rtwp_turn_protocol.md,
+# section 13). The six aspects revised in v3 take the v3 labels. The three that
+# passed the v2 audit keep their v2 patterns and their v2 labels. Every
+# version named here is also an audit set the phase B frame excludes.
+[aspect_labels]
+rtwp_turn_v3 = ["mode_turn_based", "pause_micro", "waiting_turns", "combat_pacing", "ui_clarity", "price_dlc"]
+rtwp_turn_v2 = ["mode_rtwp", "realtime_chaos", "bugs_performance"]
+
+# Turn-based mode added after launch: first availability on the default Steam
+# branch (opt-in beta branches excluded), at the publication time (UTC) of the
+# developer post that announced it. Read by src/dual_mode.py.
+[[mode_events]]
+app_id = 291650
+date = 2026-04-06T17:32:35Z
+opt_in_beta = 2025-11-07
+source = "https://steamstore-a.akamaihd.net/news/externalpost/steam_community_announcements/1828894815565733"
+
+[[mode_events]]
+app_id = 640820
+date = 2020-08-18T08:55:30Z
+opt_in_beta = 2020-07-20
+source = "https://steamstore-a.akamaihd.net/news/externalpost/steam_community_announcements/4828375451936483210"
+
+[[mode_events]]
+app_id = 560130
+date = 2019-01-24T18:41:06Z
+out_of_beta = 2019-05-08
+source = "https://steamstore-a.akamaihd.net/news/externalpost/steam_community_announcements/2425653583383022807"
+
+[[apps]]
+app_id = 228280
+name = "Baldur's Gate: Enhanced Edition"
+genre = "CRPG"
+cohort = "crpg"
+subgroup = "rtwp"
+tags = []
+
+[[apps]]
+app_id = 257350
+name = "Baldur's Gate II: Enhanced Edition"
+genre = "CRPG"
+cohort = "crpg"
+subgroup = "rtwp"
+tags = []
+
+[[apps]]
+app_id = 321800
+name = "Icewind Dale: Enhanced Edition"
+genre = "CRPG"
+cohort = "crpg"
+subgroup = "rtwp"
+tags = []
+
+[[apps]]
+app_id = 362960
+name = "Tyranny"
+genre = "CRPG"
+cohort = "crpg"
+subgroup = "rtwp"
+tags = []
+
+[[apps]]
+app_id = 1374930
+name = "Black Geyser: Couriers of Darkness"
+genre = "CRPG"
+cohort = "crpg"
+subgroup = "rtwp"
+tags = ["swap_in"]
+
+[[apps]]
+app_id = 435150
+name = "Divinity: Original Sin 2 - Definitive Edition"
+genre = "CRPG"
+cohort = "crpg"
+subgroup = "turn_based"
+tags = []
+
+[[apps]]
+app_id = 1086940
+name = "Baldur's Gate 3"
+genre = "CRPG"
+cohort = "crpg"
+subgroup = "turn_based"
+tags = []
+
+[[apps]]
+app_id = 1096530
+name = "Solasta: Crown of the Magister"
+genre = "CRPG"
+cohort = "crpg"
+subgroup = "turn_based"
+tags = []
+
+[[apps]]
+app_id = 2186680
+name = "Warhammer 40,000: Rogue Trader"
+genre = "CRPG"
+cohort = "crpg"
+subgroup = "turn_based"
+tags = []
+
+[[apps]]
+app_id = 719040
+name = "Wasteland 3"
+genre = "CRPG"
+cohort = "crpg"
+subgroup = "turn_based"
+tags = []
+
+[[apps]]
+app_id = 236850
+name = "Europa Universalis IV"
+genre = "Grand strategy"
+cohort = "strategy"
+subgroup = "rtwp"
+tags = []
+
+[[apps]]
+app_id = 1158310
+name = "Crusader Kings III"
+genre = "Grand strategy"
+cohort = "strategy"
+subgroup = "rtwp"
+tags = []
+
+[[apps]]
+app_id = 394360
+name = "Hearts of Iron IV"
+genre = "Grand strategy"
+cohort = "strategy"
+subgroup = "rtwp"
+tags = []
+
+[[apps]]
+app_id = 529340
+name = "Victoria 3"
+genre = "Grand strategy"
+cohort = "strategy"
+subgroup = "rtwp"
+tags = []
+
+[[apps]]
+app_id = 281990
+name = "Stellaris"
+genre = "Grand strategy"
+cohort = "strategy"
+subgroup = "rtwp"
+tags = []
+
+[[apps]]
+app_id = 289070
+name = "Civilization VI"
+genre = "4X"
+cohort = "strategy"
+subgroup = "turn_based"
+tags = []
+
+[[apps]]
+app_id = 597180
+name = "Old World"
+genre = "4X"
+cohort = "strategy"
+subgroup = "turn_based"
+tags = []
+
+[[apps]]
+app_id = 1124300
+name = "Humankind"
+genre = "4X"
+cohort = "strategy"
+subgroup = "turn_based"
+tags = []
+
+[[apps]]
+app_id = 1669000
+name = "Age of Wonders 4"
+genre = "4X"
+cohort = "strategy"
+subgroup = "turn_based"
+tags = []
+
+[[apps]]
+app_id = 289130
+name = "Endless Legend"
+genre = "4X"
+cohort = "strategy"
+subgroup = "turn_based"
+tags = []
+
+[[apps]]
+app_id = 291650
+name = "Pillars of Eternity"
+genre = "CRPG"
+cohort = "dual_mode"
+subgroup = ""
+tags = ["dual_mode", "mode_added"]
+raw_cap = 20000
+
+[[apps]]
+app_id = 640820
+name = "Pathfinder: Kingmaker Enhanced Plus Edition"
+genre = "CRPG"
+cohort = "dual_mode"
+subgroup = ""
+tags = ["dual_mode", "mode_added"]
+raw_cap = 20000
+
+[[apps]]
+app_id = 560130
+name = "Pillars of Eternity II: Deadfire"
+genre = "CRPG"
+cohort = "dual_mode"
+subgroup = ""
+tags = ["dual_mode", "mode_added"]
+raw_cap = 20000
+
+[[apps]]
+app_id = 1184370
+name = "Pathfinder: Wrath of the Righteous - Enhanced Edition"
+genre = "CRPG"
+cohort = "dual_mode"
+subgroup = ""
+tags = ["dual_mode", "both_at_launch"]
+raw_cap = 20000
+
+[[apps]]
+app_id = 1369370
+name = "Combat Mission Shock Force 2"
+genre = "Wargame"
+cohort = "dual_mode"
+subgroup = ""
+tags = ["dual_mode", "both_at_launch"]
+raw_cap = 20000
+
+[[apps]]
+app_id = 2297010
+name = "Combat Mission Battle for Normandy"
+genre = "Wargame"
+cohort = "dual_mode"
+subgroup = ""
+tags = ["dual_mode", "both_at_launch"]
+raw_cap = 20000

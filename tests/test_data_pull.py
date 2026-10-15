@@ -288,3 +288,26 @@ def test_census_pull_saves_partial_and_resumes(
     assert manifest["query_summary"]["total_reviews"] == 10
     assert mock_req.call_args_list[2].args[1]["cursor"] == "c2"
     assert not (tmp_path / "raw" / "1.partial.json").exists()
+
+
+@patch("src.data_pull.time.sleep")
+@patch("src.data_pull._request_json")
+def test_census_pull_uses_the_app_cap_over_the_study_cap(
+    mock_req: MagicMock, mock_sleep: MagicMock, tmp_path: Path
+) -> None:
+    """An app's raw_cap replaces the study cap for that app only."""
+    from dataclasses import replace
+
+    from src.data_pull import census_pull
+
+    study = _make_study(tmp_path, cap=2)
+    study = replace(study, apps=(replace(study.apps[0], raw_cap=5),))
+    baseline = {"success": 1, "query_summary": {"total_reviews": 99}}
+    mock_req.side_effect = [_page([1, 2, 3], "c2"), _page([4, 5, 6], "c3"), baseline]
+
+    manifest = census_pull(study.apps[0], study)
+
+    assert manifest is not None
+    assert manifest["reviews_collected"] == 5
+    assert manifest["cap"] == 5
+    assert manifest["cap_hit"] is True

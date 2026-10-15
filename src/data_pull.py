@@ -408,10 +408,13 @@ def census_paths(study: Study, app_id: int) -> tuple[Path, Path]:
 
 
 def census_pull(app: AppSpec, study: Study) -> dict[str, Any] | None:
-    """Pull every review for one app, newest first, up to the study's cap.
+    """Pull every review for one app, newest first, up to its cap.
+
+    The cap is the app's ``raw_cap`` when set, otherwise the study's
+    ``raw_cap_per_game``.
 
     Stops when the API returns no reviews, a page adds no new review IDs,
-    the cursor stops advancing, or ``raw_cap_per_game`` is reached. Page 1's
+    the cursor stops advancing, or the cap is reached. Page 1's
     ``query_summary`` is recorded, and one extra ``num_per_page=0`` request
     records the population summary with the study's baseline parameters.
 
@@ -437,7 +440,7 @@ def census_pull(app: AppSpec, study: Study) -> dict[str, Any] | None:
             return json.load(f)
 
     sampling = study.sampling
-    cap = sampling.raw_cap_per_game
+    cap = app.raw_cap if app.raw_cap is not None else sampling.raw_cap_per_game
     partial_path = study.raw_dir / f"{app.app_id}.partial.json"
     started_at = datetime.now(timezone.utc).isoformat()
     reviews: dict[str, dict] = {}

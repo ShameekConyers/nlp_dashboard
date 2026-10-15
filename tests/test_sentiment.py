@@ -397,3 +397,27 @@ def test_run_sentinel_rows_get_zero_scores(
     assert scores[2] == 0.0
     assert scores[3] == 0.0
     conn.close()
+
+
+def test_run_validates_on_the_study_split_only(
+    tmp_path: "Path", caplog: pytest.LogCaptureFixture
+) -> None:
+    """A study with stats_split logs validation over that split's kept reviews only."""
+    import logging
+
+    from src.stats import dev_test_split
+    from src.study import AppSpec, Sampling, Study
+
+    reviews = [(f"split_{i}", f"Review {i} has wonderful combat and a great story", i % 3 != 0)
+               for i in range(40)]
+    db_path = _setup_e2e_db(tmp_path, reviews)
+    study = Study(
+        name="split", title="t", seed_db=db_path, full_db=tmp_path / "full.db",
+        raw_dir=tmp_path / "raw", language_filter=False, aspect_lexicon=None,
+        sampling=Sampling("natural", "recent", "english", "all", "all", 1, 100, 100, 100, 42),
+        baseline=None, apps=(AppSpec(1, "G", "RPG", "c", "", ()),), stats_split="dev",
+    )
+    with caplog.at_level(logging.INFO, logger="src.sentiment"):
+        run(mode="seed", study=study)
+    n_dev = sum(dev_test_split(rid) == "dev" for rid, _, _ in reviews)
+    assert f"Validation restricted to the dev split ({n_dev} reviews)." in caplog.text

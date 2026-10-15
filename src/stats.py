@@ -104,6 +104,10 @@ SCOPE_GAME: str = "game"
 SCOPE_COHORT: str = "cohort"
 SCOPE_SUBGROUP: str = "subgroup"
 SCOPE_SUBGROUP_MATCHED: str = "subgroup_matched"
+SCOPE_COHORT_SUBGROUP: str = "cohort_subgroup"
+"""One subgroup inside one cohort (scope id ``cohort/subgroup``). Emitted only
+for a subgroup name that appears in more than one cohort, where the plain
+subgroup scope pools cohorts."""
 SCOPE_ALL: str = "all"
 
 
@@ -519,11 +523,17 @@ class ReviewRow:
     topic_id: int
 
 
-def load_reviews(conn: sqlite3.Connection) -> list[ReviewRow]:
+_IN_SPLIT_WHERE: str = "WHERE d.id IN (SELECT document_id FROM temp.stats_split_ids)"
+"""Filter to the documents ``_split_ids`` stored for the study's stats split."""
+
+
+def load_reviews(conn: sqlite3.Connection, in_split_only: bool = False) -> list[ReviewRow]:
     """Load kept English reviews with sentiment and topic.
 
     Args:
         conn: Study seed connection.
+        in_split_only: Load only documents in ``temp.stats_split_ids`` (filled
+            by ``_split_ids``), so rows of the other split are never read.
 
     Returns:
         Rows ordered by document id.
@@ -536,6 +546,8 @@ def load_reviews(conn: sqlite3.Connection) -> list[ReviewRow]:
         JOIN processed_documents p ON p.document_id = d.id
         JOIN nlp_results n ON n.document_id = d.id
         WHERE p.token_count >= ?
+        """ + ("AND d.id IN (SELECT document_id FROM temp.stats_split_ids)" if in_split_only else "")
+        + """
         ORDER BY d.id
         """,
         (MIN_TOKEN_COUNT,),
@@ -598,6 +610,83 @@ def load_audit_precision(label_path: Path) -> dict[str, dict[str, Any]]:
     return out
 
 
+def study_precision(study: Study, lexicon: Any, required: bool = False) -> dict[str, dict[str, Any]]:
+    """Return each aspect's precision from the label file that governs it.
+
+    A study with ``[aspect_labels]`` takes each aspect's precision from the
+    audit labels of the lexicon version named for it there. After an audit
+    retry, that is the retry's labels for the revised aspects and the earlier
+    audit's labels for the unchanged ones. Rows of other aspects in a
+    governing file are ignored, so a retried aspect's earlier labels never
+    count. A study without ``[aspect_labels]`` reads only its lexicon's own
+    label file, as before.
+
+    Args:
+        study: The study.
+        lexicon: The study's ``aspects.Lexicon``.
+        required: Every lexicon aspect must get a precision. Use it once the
+            labels are expected to exist, for example before a power run on
+            testable candidates or a confirmatory read.
+
+    Returns:
+        ``{aspect: {n, relevant, precision, ci_low, ci_high, passes,
+        label_version}}`` in lexicon order. Without ``required``, aspects whose
+        label file does not exist yet are left out.
+
+    Raises:
+        ValueError: If ``[aspect_labels]`` leaves a lexicon aspect without a
+            governing version, names an aspect the lexicon does not define,
+            or governs an aspect the lexicon revised by another version than
+            the lexicon's own. With ``required``, also if a governed aspect has
+            no rows in its label file.
+        FileNotFoundError: With ``required``, if a governing label file is
+            missing.
+    """
+    from src.aspects import audit_paths, label_path
+
+    names = [a.name for a in lexicon.aspects]
+    if not study.aspect_labels:
+        path = audit_paths(study, lexicon)[1]
+        if required and not path.exists():
+            raise FileNotFoundError(f"Label file {path} is missing.")
+        legacy = load_audit_precision(path)
+        unlabeled = [a for a in names if a not in legacy]
+        if required and unlabeled:
+            raise ValueError(f"Study {study.name}: aspects {unlabeled} have no rows in {path}.")
+        return legacy
+    governs = study.label_versions()
+    ungoverned = [a for a in names if a not in governs]
+    if ungoverned:
+        raise ValueError(f"Study {study.name}: aspects {ungoverned} have no governing label "
+                         "file in [aspect_labels].")
+    unknown = sorted(set(governs) - set(names))
+    if unknown:
+        raise ValueError(f"Study {study.name}: [aspect_labels] names aspects {unknown} that "
+                         f"lexicon {lexicon.version} does not define.")
+    stale = [a for a in lexicon.revised if governs[a] != lexicon.version]
+    if stale:
+        raise ValueError(f"Study {study.name}: aspects {stale} were revised in "
+                         f"{lexicon.version} but [aspect_labels] governs them by another "
+                         "version's labels.")
+    found: dict[str, dict[str, Any]] = {}
+    for version in dict.fromkeys(governs[a] for a in names):
+        path = label_path(version)
+        if not path.exists():
+            if required:
+                raise FileNotFoundError(f"Label file {path} is missing (it governs "
+                                        f"{[a for a in names if governs[a] == version]}).")
+            continue
+        for aspect, p in load_audit_precision(path).items():
+            if governs.get(aspect) == version:
+                found[aspect] = {**p, "label_version": version}
+    if required:
+        unlabeled = [a for a in names if a not in found]
+        if unlabeled:
+            raise ValueError(f"Study {study.name}: aspects {unlabeled} have no rows in their "
+                             "governing label file.")
+    return {a: found[a] for a in names if a in found}
+
+
 def _git_sha() -> str:
     """Return the current commit SHA with a ``-dirty`` suffix if the tree changed.
 
@@ -635,17 +724,20 @@ def _num(x: float) -> float | None:
 # ---------------------------------------------------------------------------
 
 
-def vader_validation(rows: Sequence[ReviewRow]) -> dict[str, Any]:
-    """VADER against the recommend flag on the test split of a natural sample.
+def vader_validation(rows: Sequence[ReviewRow], split: str = "test") -> dict[str, Any]:
+    """VADER against the recommend flag on one split of a natural sample.
 
     Args:
         rows: Kept English reviews.
+        split: ``test`` (default) or ``dev``. A study whose statistics are
+            restricted to the dev split validates on the dev split, so no
+            recommend flag of a test review is read.
 
     Returns:
         Accuracy, balanced accuracy with a bootstrap interval, the strategy
         false-positive rate (not-recommended reviews scored positive) and n.
     """
-    test = [r for r in rows if dev_test_split(r.steam_review_id) == "test"]
+    test = [r for r in rows if dev_test_split(r.steam_review_id) == split]
     y = np.array([r.recommended for r in test])
     pred = np.array([r.compound >= VADER_POSITIVE_THRESHOLD for r in test])
     rng = np.random.default_rng(BOOT_SEED)
@@ -655,7 +747,7 @@ def vader_validation(rows: Sequence[ReviewRow]) -> dict[str, Any]:
         boots.append(balanced_accuracy(y[idx], pred[idx]))
     not_rec = ~y
     return {
-        "split": "test",
+        "split": split,
         "threshold": VADER_POSITIVE_THRESHOLD,
         "n": int(y.size),
         "n_not_recommended": int(not_rec.sum()),
@@ -721,7 +813,9 @@ def _scopes(study: Study, eligible: set[int], kept_ok: set[int]) -> list[tuple[s
         kept_ok: App IDs with enough kept reviews for recommend-share macros.
 
     Returns:
-        ``(scope_type, scope_id, all_app_ids, eligible_app_ids)`` tuples.
+        ``(scope_type, scope_id, all_app_ids, eligible_app_ids)`` tuples. A
+        subgroup name shared by several cohorts also yields one
+        ``cohort_subgroup`` scope per cohort.
     """
     scopes: list[tuple[str, str, list[int], list[int]]] = []
     all_ids = [a.app_id for a in study.apps]
@@ -734,16 +828,53 @@ def _scopes(study: Study, eligible: set[int], kept_ok: set[int]) -> list[tuple[s
         scopes.append((SCOPE_SUBGROUP, sub, ids, [a for a in ids if a in eligible]))
         matched = [a.app_id for a in study.apps if a.subgroup == sub and "matched_basket" in a.tags]
         scopes.append((SCOPE_SUBGROUP_MATCHED, sub, matched, [a for a in matched if a in eligible]))
+    for cohort, sub in dict.fromkeys((a.cohort, a.subgroup) for a in study.apps if a.subgroup):
+        if len({a.cohort for a in study.apps if a.subgroup == sub}) < 2:
+            continue
+        ids = [a.app_id for a in study.apps if a.cohort == cohort and a.subgroup == sub]
+        scopes.append((SCOPE_COHORT_SUBGROUP, f"{cohort}/{sub}", ids, [a for a in ids if a in eligible]))
     return scopes
 
 
-def run(study: Study, n_boot: int = N_BOOT, unfreeze: bool = False) -> int:
+def _split_ids(conn: sqlite3.Connection, split: str | None) -> int | None:
+    """Fill ``temp.stats_split_ids`` with the seed documents in one split.
+
+    Args:
+        conn: Study seed connection.
+        split: ``dev``, ``test`` or None (no restriction, nothing written).
+
+    Returns:
+        Number of documents in the split, or None when ``split`` is None.
+    """
+    if split is None:
+        return None
+    conn.execute("CREATE TEMP TABLE IF NOT EXISTS stats_split_ids (document_id INTEGER PRIMARY KEY)")
+    conn.execute("DELETE FROM temp.stats_split_ids")
+    ids = [
+        (doc_id,) for doc_id, rid in conn.execute("SELECT id, steam_review_id FROM documents")
+        if dev_test_split(rid) == split
+    ]
+    conn.executemany("INSERT INTO temp.stats_split_ids VALUES (?)", ids)
+    return len(ids)
+
+
+def run(
+    study: Study, n_boot: int = N_BOOT, unfreeze: bool = False, assume_precision: bool = False
+) -> int:
     """Compute and store all statistics for a study seed.
+
+    With ``study.stats_split`` set, every statistic (eligibility, rates,
+    theme metrics, findings, the VADER validation and the seed and drop
+    counts in ``game_stats``) uses only the seed reviews in that split, and
+    no recommend flag of a review in the other split is read.
 
     Args:
         study: A natural-sampling study whose NLP stages have run.
         n_boot: Bootstrap resamples.
         unfreeze: Allow writing a frozen study's seed database.
+        assume_precision: Treat every aspect as if it had passed its precision
+            audit. Only for ``candidate_run``, which runs on a copy of the
+            seed, so a stored ``stats`` run never rests on an assumed audit.
 
     Returns:
         The new ``analysis_runs.run_id``.
@@ -752,18 +883,25 @@ def run(study: Study, n_boot: int = N_BOOT, unfreeze: bool = False) -> int:
         FrozenStudyError: If a target path belongs to a frozen study and ``unfreeze`` is False.
     """
     guard_writable([study.seed_db], unfreeze)
-    from src.aspects import ANY_TURN_STRUCTURE, TURN_STRUCTURE_ASPECTS, audit_paths, load_lexicon
+    from src.aspects import ANY_TURN_STRUCTURE, TURN_STRUCTURE_ASPECTS, load_lexicon
     from src.db_setup import create_study_tables
 
     assert study.aspect_lexicon is not None
     lexicon = load_lexicon(study.aspect_lexicon)
-    _, label_path = audit_paths(study, lexicon)
-    precision = load_audit_precision(label_path)
+    precision = study_precision(study, lexicon)
+    if assume_precision:
+        precision = {
+            a.name: {"n": 0, "relevant": 0, "precision": None, "ci_low": None, "ci_high": None,
+                     "passes": True, "assumed": True}
+            for a in lexicon.aspects
+        }
 
     conn = sqlite3.connect(study.seed_db)
     try:
         create_study_tables(conn)
-        rows = load_reviews(conn)
+        split = study.stats_split
+        in_split = _split_ids(conn, split)
+        rows = load_reviews(conn, in_split_only=split is not None)
         aspect_sets = load_aspect_sets(conn, lexicon.version)
         topics = [
             (tid, label) for tid, label in conn.execute(
@@ -838,6 +976,7 @@ def run(study: Study, n_boot: int = N_BOOT, unfreeze: bool = False) -> int:
                 FROM documents d
                 JOIN processed_documents p ON p.document_id = d.id
                 LEFT JOIN review_language l ON l.document_id = d.id
+                """ + (_IN_SPLIT_WHERE if split is not None else "") + """
                 GROUP BY d.app_id
                 """,
                 (10, 10, MIN_TOKEN_COUNT, MIN_TOKEN_COUNT),
@@ -846,7 +985,8 @@ def run(study: Study, n_boot: int = N_BOOT, unfreeze: bool = False) -> int:
 
         seed_counts = {
             r[0]: (r[1], r[2]) for r in conn.execute(
-                "SELECT app_id, COUNT(*), SUM(recommended) FROM documents GROUP BY app_id"
+                "SELECT app_id, COUNT(*), SUM(recommended) FROM documents d "
+                + (_IN_SPLIT_WHERE if split is not None else "") + " GROUP BY app_id"
             )
         }
         eligible: set[int] = set()
@@ -893,9 +1033,10 @@ def run(study: Study, n_boot: int = N_BOOT, unfreeze: bool = False) -> int:
                 app.app_id in eligible,
             ))
 
-        validation = vader_validation(rows)
+        validation = vader_validation(rows, split="dev" if split == "dev" else "test")
         params = {
             "study": study.name,
+            "stats_split": split,
             "lexicon_version": lexicon.version,
             "n_boot": n_boot,
             "boot_seed": BOOT_SEED,
@@ -1045,6 +1186,8 @@ def run(study: Study, n_boot: int = N_BOOT, unfreeze: bool = False) -> int:
         )
         metrics = {
             "finding_rule": FINDING_RULE,
+            "stats_split": split,
+            "n_split_documents": in_split,
             "n_games": len(study.apps),
             "n_kept": len(rows),
             "eligible_app_ids": sorted(eligible),
@@ -1059,7 +1202,13 @@ def run(study: Study, n_boot: int = N_BOOT, unfreeze: bool = False) -> int:
             "vader_validation": validation,
             "sentiment_model": params["sentiment_model"],
             "aspect_precision": precision,
-            "aspect_audit_status": "complete" if precision else "labels pending",
+            "aspect_audit_status": (
+                "assumed passing (candidates only)" if assume_precision
+                else "partial" if study.aspect_labels and precision
+                and len(precision) < len(lexicon.aspects)
+                else "complete" if precision else "labels pending"
+            ),
+            "precision_assumed": assume_precision,
             "topic_labels": {str(t): label for t, label in topics},
             "lexicon_version": lexicon.version,
             "aspect_labels": {a.name: a.label for a in lexicon.aspects}
@@ -1295,12 +1444,12 @@ def coverage_proxy(study: Study, unfreeze: bool = False) -> int:
         FrozenStudyError: If a target path belongs to a frozen study and ``unfreeze`` is False.
     """
     guard_writable([study.seed_db], unfreeze)
-    from src.aspects import audit_paths, load_lexicon
+    from src.aspects import load_lexicon
     from src.db_setup import create_study_tables
 
     assert study.aspect_lexicon is not None
     lexicon = load_lexicon(study.aspect_lexicon)
-    precision = load_audit_precision(audit_paths(study, lexicon)[1])
+    precision = study_precision(study, lexicon)
     passing = {a for a, p in precision.items() if p["passes"]}
     conn = sqlite3.connect(study.seed_db)
     try:
@@ -1354,6 +1503,99 @@ def coverage_proxy(study: Study, unfreeze: bool = False) -> int:
         conn.close()
 
 
+def candidate_run(study: Study, out_dir: Path, n_boot: int = N_BOOT) -> Path:
+    """Compute exploratory candidates with every aspect assumed to pass its audit.
+
+    Before the precision audit is labeled, no aspect can meet the finding
+    rule, so the stats stage reports aspects as descriptive only. This run
+    copies the seed into ``out_dir``, runs ``run`` on the copy with
+    ``assume_precision=True`` and exports it there. The study's own seed is
+    only read. Every finding in the export is a candidate, conditional on its
+    aspect passing the audit later.
+
+    Args:
+        study: The study (its aspect stage must have run).
+        out_dir: Directory for the seed copy and the export.
+        n_boot: Bootstrap resamples.
+
+    Returns:
+        Path of the exported JSON file.
+    """
+    from dataclasses import replace
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    copy = out_dir / "candidate_seed.db"
+    src = sqlite3.connect(f"{study.seed_db.resolve().as_uri()}?mode=ro", uri=True)
+    dst = sqlite3.connect(copy)
+    try:
+        src.backup(dst)  # replaces any earlier copy's content
+    finally:
+        src.close()
+        dst.close()
+    shadow = replace(study, seed_db=copy, scores_db=study.scores_path)
+    run_id = run(shadow, n_boot=n_boot, assume_precision=True)
+    return export_run(shadow, out_dir, run_id, stem="candidates")
+
+
+EXPORT_TABLES: tuple[str, ...] = ("game_stats", "cohort_stats", "theme_stats")
+"""Per-run tables written by ``export_run``."""
+
+
+def export_run(study: Study, out_dir: Path, run_id: int | None = None, stem: str = "stats") -> Path:
+    """Write one stats run to files: metrics as JSON, each per-run table as CSV.
+
+    Reads the seed only (read-only connection), so it never changes a study.
+
+    Args:
+        study: The study.
+        out_dir: Directory for ``stats_run_<id>.json`` and
+            ``<table>_run_<id>.csv``.
+        run_id: The ``analysis_runs`` row (default: the newest ``stats`` run).
+        stem: File name prefix (``stats`` or ``candidates``).
+
+    Returns:
+        Path of the JSON file.
+
+    Raises:
+        ValueError: If the seed has no such stats run.
+    """
+    conn = sqlite3.connect(f"{study.seed_db.resolve().as_uri()}?mode=ro", uri=True)
+    try:
+        if run_id is None:
+            run_id = conn.execute(
+                "SELECT MAX(run_id) FROM analysis_runs WHERE stage = 'stats'"
+            ).fetchone()[0]
+        row = conn.execute(
+            "SELECT params, git_sha, created_at, metrics FROM analysis_runs "
+            "WHERE run_id = ? AND stage = 'stats'",
+            (run_id,),
+        ).fetchone() if run_id is not None else None
+        if row is None:
+            raise ValueError(f"No stats run {run_id} in {study.seed_db}.")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        json_path = out_dir / f"{stem}_run_{run_id}.json"
+        json_path.write_text(json.dumps({
+            "run_id": run_id, "params": json.loads(row[0]), "git_sha": row[1],
+            "created_at": row[2], "metrics": json.loads(row[3]),
+        }, indent=2), encoding="utf-8")
+        queries = {
+            "game_stats": "SELECT * FROM game_stats WHERE run_id = ?",
+            "cohort_stats": "SELECT * FROM cohort_stats WHERE run_id = ?",
+            "theme_stats": "SELECT * FROM theme_stats WHERE run_id = ?",
+        }
+        for table in EXPORT_TABLES:
+            cur = conn.execute(queries[table], (run_id,))
+            name = f"{table}_run_{run_id}.csv" if stem == "stats" else f"{stem}_{table}_run_{run_id}.csv"
+            with open(out_dir / name, "w", encoding="utf-8", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([d[0] for d in cur.description])
+                writer.writerows(cur.fetchall())
+    finally:
+        conn.close()
+    logger.info("Exported stats run %d to %s", run_id, out_dir)
+    return json_path
+
+
 def main() -> None:
     """CLI entry point: compute stats, optionally run reference checks."""
     parser = argparse.ArgumentParser(description="Compute study statistics.")
@@ -1367,11 +1609,27 @@ def main() -> None:
         "--coverage", action="store_true",
         help="Store the lexicon coverage proxy (unmatched not-recommended reviews by topic).",
     )
+    parser.add_argument(
+        "--export", type=Path, default=None,
+        help="Write the newest stats run (metrics JSON, per-run tables CSV) to this directory "
+             "and exit; reads the analysis database only.",
+    )
+    parser.add_argument(
+        "--candidates", type=Path, default=None,
+        help="Run the statistics on a copy of the analysis database with every aspect assumed "
+             "to pass its precision audit and export it to this directory (exploratory "
+             "candidates only).",
+    )
     parser.add_argument(UNFREEZE_FLAG, dest="unfreeze", action="store_true", help=UNFREEZE_HELP)
     args = parser.parse_args()
-    study = load_study(args.study)
+    # The seed, or the stats_split half of the full database for stats_source = "full".
+    study = load_study(args.study).analysis_view()
     try:
-        if args.coverage:
+        if args.export is not None:
+            export_run(study, args.export)
+        elif args.candidates is not None:
+            candidate_run(study, args.candidates, n_boot=args.n_boot)
+        elif args.coverage:
             coverage_proxy(study, unfreeze=args.unfreeze)
         elif args.reference is not None:
             reference_checks(study, args.reference, unfreeze=args.unfreeze)

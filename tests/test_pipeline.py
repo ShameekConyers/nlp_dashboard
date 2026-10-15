@@ -174,3 +174,129 @@ def test_seed_sampling_applies_the_window_to_older_loads(tmp_path: Path) -> None
     # Review ids 40..160 fall in the window: 81 of app 101 and the first 40 of app 202.
     assert counts == {101: 81, 202: 40, 303: 0}
     assert (n, outside) == (121, 0)
+
+
+def test_dev_split_study_reruns_idempotently_and_refits_stats_on_split_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stats_split study is idempotent; changing only the split reruns stats."""
+    monkeypatch.setattr("src.stats.N_BOOT", 50)
+    monkeypatch.setattr("src.aspects.DATA_DIR", tmp_path / "labels_none")
+    args = study_cli.build_parser().parse_args([
+        "new", "--name", "devmini", "--apps", ",".join(map(str, APPS)), "--cohort", "c1",
+        "--names", "G101|G202|G303", "--out", str(tmp_path / "devmini.toml"),
+        "--data-dir", str(tmp_path / "data"), "--no-baseline",
+    ])
+    toml = study_cli.new_study(args)
+    toml.write_text(toml.read_text().replace("[study]\n", '[study]\nstats_split = "dev"\n', 1))
+    study = load_study(toml)
+    assert study.stats_split == "dev"
+    _write_fixture_pulls(study.raw_dir)
+    stages = [replace(s, run=_fake_topics) if s.name == "topics" else s for s in pipeline.STAGES]
+
+    pipeline.run(study, full=True, stages=stages)
+    before = _snapshot([study.full_db, study.seed_db])
+    second = pipeline.run(study, full=True, stages=stages)
+    assert second["stats"] == "skipped"
+    assert _snapshot([study.full_db, study.seed_db]) == before
+
+    conn = sqlite3.connect(study.seed_db)
+    metrics = json.loads(conn.execute(
+        "SELECT metrics FROM analysis_runs WHERE stage = 'stats' ORDER BY run_id DESC LIMIT 1"
+    ).fetchone()[0])
+    conn.close()
+    assert metrics["stats_split"] == "dev"
+    assert metrics["vader_validation"]["split"] == "dev"
+
+    third = pipeline.run(replace(study, stats_split="test"), full=True, stages=stages)
+    assert third["stats"] == "ran"
+
+
+def _full_source_study(tmp_path: Path):  # noqa: ANN202 - Study
+    args = study_cli.build_parser().parse_args([
+        "new", "--name", "fullmini", "--apps", ",".join(map(str, APPS)), "--cohort", "c1",
+        "--names", "G101|G202|G303", "--out", str(tmp_path / "fullmini.toml"),
+        "--data-dir", str(tmp_path / "data"), "--no-baseline",
+    ])
+    toml = study_cli.new_study(args)
+    toml.write_text(toml.read_text().replace(
+        "[study]\n", '[study]\nstats_split = "dev"\nstats_source = "full"\n', 1))
+    return load_study(toml)
+
+
+def test_full_source_runs_on_the_dev_half_and_never_reads_a_test_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Test-half recommend flags are poisoned after the load: none may reach the analysis."""
+    from src.stats import dev_test_split
+
+    monkeypatch.setattr("src.stats.N_BOOT", 50)
+    monkeypatch.setattr("src.aspects.DATA_DIR", tmp_path / "labels_none")
+    study = _full_source_study(tmp_path)
+    _write_fixture_pulls(study.raw_dir)
+    stages = [replace(s, run=_fake_topics) if s.name == "topics" else s for s in pipeline.STAGES]
+    no_stats = [s for s in stages if s.name not in ("preprocess", "sentiment", "topics",
+                                                    "aspects", "stats")]
+    pipeline.run(replace(study, stats_source=None), full=True, stages=no_stats)  # pull to seed
+
+    conn = sqlite3.connect(study.full_db)
+    rows = conn.execute("SELECT id, steam_review_id FROM documents").fetchall()
+    test_ids = [(i,) for i, rid in rows if dev_test_split(rid) == "test"]
+    dev_rids = {rid for _, rid in rows if dev_test_split(rid) == "dev"}
+    assert test_ids and dev_rids
+    conn.executemany("UPDATE documents SET recommended = 'POISON', review_text = 'POISON' "
+                     "WHERE id = ?", test_ids)
+    conn.commit()
+    conn.close()
+    seed_before = _snapshot([study.seed_db])
+
+    first = pipeline.run(study, stages=stages)
+    assert first["split"] == "ran" and first["stats"] == "ran"
+    assert _snapshot([study.seed_db]) == seed_before  # the seed is not touched
+
+    out = sqlite3.connect(study.analysis_db)
+    got = {rid for (rid,) in out.execute("SELECT steam_review_id FROM documents")}
+    assert got == dev_rids
+    assert out.execute("SELECT COUNT(*) FROM documents WHERE recommended = 'POISON' "
+                       "OR review_text = 'POISON'").fetchone()[0] == 0
+    metrics = json.loads(out.execute(
+        "SELECT metrics FROM analysis_runs WHERE stage = 'stats' ORDER BY run_id DESC LIMIT 1"
+    ).fetchone()[0])
+    assert metrics["stats_split"] == "dev" and metrics["n_split_documents"] == len(dev_rids)
+    out.close()
+
+    before = _snapshot([study.full_db, study.seed_db, study.analysis_db])
+    second = pipeline.run(study, stages=stages)
+    assert second == {
+        "pull": "not applicable", "load": "not applicable", "seed": "not applicable",
+        "split": "no-op", "preprocess": "no-op", "sentiment": "no-op", "topics": "no-op",
+        "aspects": "skipped", "stats": "skipped",
+    }
+    assert _snapshot([study.full_db, study.seed_db, study.analysis_db]) == before
+
+
+def test_split_builder_reads_only_split_rows_of_the_full_database(tmp_path: Path) -> None:
+    """Every SELECT on the full database that reads review columns is limited to the split."""
+    study = _full_source_study(tmp_path)
+    _write_fixture_pulls(study.raw_dir)
+    pull_only = [s for s in pipeline.STAGES if s.on_view is False]
+    pipeline.run(replace(study, stats_source=None), full=True, stages=pull_only)
+
+    statements: list[str] = []
+    real_connect = sqlite3.connect
+
+    def traced(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        conn = real_connect(*args, **kwargs)
+        if str(args[0]).startswith("file:") and "full" in str(args[0]):
+            conn.set_trace_callback(statements.append)
+        return conn
+
+    import src.pipeline as pl
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(pl.sqlite3, "connect", traced)
+        added = pipeline.build_split_db(study)
+    assert added > 0
+    reads = [s for s in statements if s.lstrip().upper().startswith("SELECT")
+             and ("recommended" in s or "review_text" in s or "steam_language" in s)]
+    assert reads and all("temp.split_ids" in s for s in reads), reads

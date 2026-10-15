@@ -17,6 +17,12 @@ writes. The fingerprint is stored in a ``pipeline_state`` table after the
 stage runs; when the stored value matches, the stage is skipped. Any change
 to its inputs, or to its outputs made outside the pipeline, runs it again.
 
+A study with ``stats_source = "full"`` adds a ``split`` stage after ``seed``:
+it copies the ``stats_split`` half of the full database (chosen from review
+IDs alone with ``stats.dev_test_split``) into the study's analysis database,
+and ``preprocess`` through ``stats`` then run on that database instead of the
+seed (``Study.analysis_view``). The seed is left as it is.
+
 Transformer scoring and its validation stay separate commands
 (``src/sentiment_transformer.py``), because adopting a model follows a
 pre-registered comparison, not a pipeline default.
@@ -251,6 +257,87 @@ def _seed(study: Study, unfreeze: bool) -> None:
     vacuum(study.seed_db)
 
 
+def build_split_db(study: Study, unfreeze: bool = False) -> int:
+    """Copy one half of the full database into the study's analysis database.
+
+    The half is chosen from review IDs alone (``stats.dev_test_split``), and
+    only that half's rows are then read, so no column of the other half's
+    reviews, its recommend flag included, is ever read. Metadata, study_apps
+    and pull_runs are copied whole. Reviews already in the analysis database
+    are kept and not read again, so a rerun adds only new reviews.
+
+    Args:
+        study: A study with ``stats_source = "full"`` (or its analysis view).
+        unfreeze: Allow writing a frozen study's files.
+
+    Returns:
+        Number of documents copied in this call.
+
+    Raises:
+        ValueError: If the study does not use the full database for its stats.
+    """
+    from src.db_setup import _DOC_COLUMNS, create_study_tables
+    from src.stats import dev_test_split
+
+    if study.stats_source != "full" or study.stats_split is None:
+        raise ValueError(f"Study {study.name} does not set stats_source = \"full\".")
+    dst = study.analysis_db
+    guard_writable([dst], unfreeze)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    full = sqlite3.connect(f"{study.full_db.resolve().as_uri()}?mode=ro", uri=True)
+    out = sqlite3.connect(dst)
+    try:
+        create_study_tables(out)
+        for table in ("metadata", "study_apps", "pull_runs"):
+            cols = [r[1] for r in full.execute(f"PRAGMA table_info({table})")]
+            rows = full.execute(f"SELECT {', '.join(cols)} FROM {table}").fetchall()
+            out.executemany(
+                f"INSERT OR IGNORE INTO {table} ({', '.join(cols)}) "
+                f"VALUES ({', '.join('?' * len(cols))})",
+                rows,
+            )
+        have = {rid for (rid,) in out.execute("SELECT steam_review_id FROM documents")}
+        in_split = [
+            (doc_id, rid) for doc_id, rid in full.execute("SELECT id, steam_review_id FROM documents")
+            if dev_test_split(rid) == study.stats_split
+        ]
+        # Only rows not copied yet: an ignored insert would still advance the
+        # AUTOINCREMENT counter and make a rerun look like a change.
+        full.execute("CREATE TEMP TABLE split_ids (id INTEGER PRIMARY KEY)")
+        full.executemany("INSERT INTO temp.split_ids VALUES (?)",
+                         [(doc_id,) for doc_id, rid in in_split if rid not in have])
+        before = out.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+        out.executemany(
+            f"INSERT OR IGNORE INTO documents ({_DOC_COLUMNS}) "
+            f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            full.execute(
+                f"SELECT {_DOC_COLUMNS} FROM documents "
+                f"WHERE id IN (SELECT id FROM temp.split_ids) ORDER BY id"
+            ),
+        )
+        out.executemany(
+            "INSERT OR IGNORE INTO review_language (document_id, steam_language) "
+            "SELECT id, ? FROM documents WHERE steam_review_id = ?",
+            [(lang, rid) for rid, lang in full.execute(
+                "SELECT d.steam_review_id, l.steam_language FROM review_language l "
+                "JOIN documents d ON d.id = l.document_id "
+                "WHERE l.document_id IN (SELECT id FROM temp.split_ids)"
+            )],
+        )
+        out.commit()
+        added = out.execute("SELECT COUNT(*) FROM documents").fetchone()[0] - before
+    finally:
+        full.close()
+        out.close()
+    logger.info("Analysis database %s: %d %s-half documents added (%d in the half).",
+                dst, added, study.stats_split, len(in_split))
+    return added
+
+
+def _split(study: Study, unfreeze: bool) -> None:
+    build_split_db(study, unfreeze=unfreeze)
+
+
 def _preprocess(study: Study, unfreeze: bool) -> None:
     from src.preprocessing import run
 
@@ -291,18 +378,21 @@ def _seed_tables_parts(study: Study, tables: Sequence[str], files: Sequence[Path
 
 
 def _label_files(study: Study) -> list[Path | None]:
-    """Return the aspect audit label file for the study's lexicon, if any.
+    """Return the aspect audit label files the stats stage reads.
 
     Args:
         study: The study.
 
     Returns:
-        A one-item list (None when the study has no lexicon).
+        One label file per version named in ``[aspect_labels]``, or else the
+        study lexicon's label file (None when the study has no lexicon).
     """
     if study.aspect_lexicon is None:
         return [None]
-    from src.aspects import audit_paths, load_lexicon
+    from src.aspects import audit_paths, label_path, load_lexicon
 
+    if study.aspect_labels:
+        return [label_path(v) for v in sorted({v for _, v in study.aspect_labels})]
     return [audit_paths(study, load_lexicon(study.aspect_lexicon))[1]]
 
 
@@ -331,6 +421,8 @@ class Stage:
             None for stages that are idempotent by design.
         state_db: ``full`` or ``seed``: where a rebuild stage stores its state.
         applies: Predicate deciding whether the stage runs for this study.
+        on_view: Run on the study's analysis view (``Study.analysis_view``),
+            which is the study itself unless ``stats_source = "full"``.
     """
 
     name: str
@@ -339,12 +431,13 @@ class Stage:
     parts: Callable[[Study], list[str]] | None = None
     state_db: str = "seed"
     applies: Callable[[Study], bool] = lambda study: True
+    on_view: bool = True
 
 
 STAGES: list[Stage] = [
-    Stage("pull", _pull, needs_full=True),
-    Stage("load", _load, needs_full=True),
-    Stage("seed", _seed, needs_full=True, parts=_seed_parts, state_db="full"),
+    Stage("pull", _pull, needs_full=True, on_view=False),
+    Stage("load", _load, needs_full=True, on_view=False),
+    Stage("seed", _seed, needs_full=True, parts=_seed_parts, state_db="full", on_view=False),
     Stage("preprocess", _preprocess),
     Stage("sentiment", _sentiment),
     Stage("topics", _topics),
@@ -359,11 +452,34 @@ STAGES: list[Stage] = [
         "stats", _stats,
         parts=lambda s: _seed_tables_parts(
             s, STATS_TABLES, [s.aspect_lexicon, *_label_files(s)]
-        ),
+        ) + ([f"stats_split={s.stats_split}"] if s.stats_split is not None else [])
+        + ([f"stats_source={s.stats_source}"] if s.stats_source is not None else [])
+        + ([f"aspect_labels={sorted(s.aspect_labels)}"] if s.aspect_labels else []),
         applies=lambda s: s.aspect_lexicon is not None,
     ),
 ]
 """Stages in run order. Tests may replace entries (for example ``topics``)."""
+
+SPLIT_STAGE: Stage = Stage("split", _split)
+"""Inserted after ``seed`` for a ``stats_source = "full"`` study only, so the
+stage list and outcomes of every other study stay as they were."""
+
+
+def stages_for(study: Study, stages: Sequence[Stage]) -> list[Stage]:
+    """Return the stage list for a study, with ``split`` added when it needs one.
+
+    Args:
+        study: The study.
+        stages: Base stage list.
+
+    Returns:
+        The stages in run order.
+    """
+    out = list(stages)
+    if study.stats_source == "full" and all(s.name != "split" for s in out):
+        at = next((i + 1 for i, s in enumerate(out) if s.name == "seed"), 0)
+        out.insert(at, SPLIT_STAGE)
+    return out
 
 
 def run(
@@ -406,18 +522,20 @@ def run(
     if not full and not study.seed_db.exists():
         raise ValueError(f"No seed at {study.seed_db}. Run with --full first.")
     outcome: dict[str, str] = {}
-    for stage in stages if stages is not None else STAGES:
-        if (stage.needs_full and not full) or not stage.applies(study):
+    view = study.analysis_view()
+    for stage in stages_for(study, stages if stages is not None else STAGES):
+        target = view if stage.on_view else study
+        if (stage.needs_full and not full) or not stage.applies(target):
             outcome[stage.name] = "not applicable"
             continue
         if stage.parts is None:
             logger.info("Stage %s", stage.name)
-            before = footprint(study)
-            stage.run(study, unfreeze)
-            outcome[stage.name] = "no-op" if footprint(study) == before else "ran"
+            before = footprint(target)
+            stage.run(target, unfreeze)
+            outcome[stage.name] = "no-op" if footprint(target) == before else "ran"
             continue
-        state_path = study.full_db if stage.state_db == "full" else study.seed_db
-        before = fingerprint(stage.parts(study))
+        state_path = target.full_db if stage.state_db == "full" else target.seed_db
+        before = fingerprint(stage.parts(target))
         if state_path.exists():
             conn = sqlite3.connect(state_path)
             try:
@@ -429,8 +547,8 @@ def run(
                 outcome[stage.name] = "skipped"
                 continue
         logger.info("Stage %s", stage.name)
-        stage.run(study, unfreeze)
-        after = fingerprint(stage.parts(study))
+        stage.run(target, unfreeze)
+        after = fingerprint(stage.parts(target))
         conn = sqlite3.connect(state_path)
         try:
             store_fingerprint(conn, stage.name, after)

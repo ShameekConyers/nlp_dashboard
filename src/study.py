@@ -8,7 +8,7 @@ baseline, so the original commands keep their behavior.
 
 import tomllib
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -20,6 +20,12 @@ DEFAULT_STUDY_PATH: Path = STUDIES_DIR / "april_2026_baseline.toml"
 
 NATURAL_REVIEW_TYPES: frozenset[str] = frozenset({"all"})
 """Natural sampling never filters on the recommend flag."""
+
+STATS_SPLITS: frozenset[str] = frozenset({"dev", "test"})
+"""Values ``stats_split`` accepts (the halves of ``stats.dev_test_split``)."""
+
+STATS_SOURCES: frozenset[str] = frozenset({"seed", "full"})
+"""Values ``stats_source`` accepts: the seed, or one half of the full database."""
 
 STRATIFIED_REVIEW_TYPES: frozenset[str] = frozenset({"positive", "negative"})
 """Review types allowed only with an explicit ``stratified = true``. They fix the
@@ -37,6 +43,9 @@ class AppSpec:
         cohort: Cohort the game belongs to.
         subgroup: Optional subgroup inside the cohort (empty string if none).
         tags: Free-form tags such as ``matched_basket`` or ``stand_in``.
+        raw_cap: Per-game override of ``sampling.raw_cap_per_game`` (``raw_cap``
+            in the app's TOML table), or None to use the study cap. Left out
+            of ``repr`` so the fingerprints of studies without it stay as they were.
     """
 
     app_id: int
@@ -45,6 +54,7 @@ class AppSpec:
     cohort: str
     subgroup: str
     tags: tuple[str, ...]
+    raw_cap: int | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -143,6 +153,21 @@ class Study:
             seed file never changes.
         frozen: True for a shipped study. Every stage that writes refuses its
             files unless called with ``--unfreeze-i-know``.
+        stats_split: ``dev`` or ``test`` to compute the stats stage on one half
+            of the hash split only (``stats_split`` in ``[study]``), or None for
+            every kept review. Left out of ``repr`` so the fingerprints of
+            studies without it stay as they were; the pipeline adds it to the
+            stats fingerprint when it is set.
+        stats_source: ``full`` to compute the processing stages and the
+            statistics on the ``stats_split`` half of the full database, copied
+            into its own analysis database (``analysis_db``), instead of on the
+            seed. ``seed`` or None keeps the seed. Left out of ``repr`` like
+            ``stats_split``.
+        aspect_labels: ``(aspect, lexicon version)`` pairs from
+            ``[aspect_labels]``: the version whose audit label file
+            (``data/labels/aspect_audit_<version>.csv``) governs each aspect's
+            precision. Empty for a study that reads only its current lexicon's
+            labels. Left out of ``repr`` like ``stats_split``.
     """
 
     name: str
@@ -160,6 +185,36 @@ class Study:
     topic_umap_preset: str = "legacy"
     scores_db: Path | None = None
     frozen: bool = False
+    stats_split: str | None = field(default=None, repr=False)
+    stats_source: str | None = field(default=None, repr=False)
+    aspect_labels: tuple[tuple[str, str], ...] = field(default=(), repr=False)
+
+    def label_versions(self) -> dict[str, str]:
+        """Return ``{aspect: lexicon version}`` from ``aspect_labels``."""
+        return dict(self.aspect_labels)
+
+    @property
+    def analysis_db(self) -> Path:
+        """Return the database the processing stages and statistics use.
+
+        The seed, unless ``stats_source`` is ``full``: then a database next to
+        the full one that holds only the ``stats_split`` half of its reviews,
+        for example ``<full stem>_dev.db``.
+        """
+        if self.stats_source != "full":
+            return self.seed_db
+        return self.full_db.with_name(f"{self.full_db.stem}_{self.stats_split}.db")
+
+    def analysis_view(self) -> "Study":
+        """Return this study with ``seed_db`` pointed at ``analysis_db``.
+
+        Every stage reads and writes ``seed_db``, so passing the view runs it
+        on the analysis database. A study without ``stats_source = "full"``
+        is returned unchanged, and the view of a view is the view.
+        """
+        if self.stats_source != "full" or self.seed_db == self.analysis_db:
+            return self
+        return replace(self, seed_db=self.analysis_db)
 
     @property
     def scores_path(self) -> Path:
@@ -239,10 +294,13 @@ def load_study(path: Path = DEFAULT_STUDY_PATH) -> Study:
 
     Raises:
         ValueError: If the file has no apps, duplicate app IDs, an app
-            without a cohort, a ``review_type`` other than ``all`` without
+            without a cohort, a ``raw_cap`` below 1, an unknown ``stats_split``
+            or ``stats_source``, ``stats_source = "full"`` without a
+            ``stats_split``, a ``review_type`` other than ``all`` without
             ``stratified = true``, ``stratified = true`` with ``review_type =
-            "all"``, an unknown review type, or a window that ends before it
-            starts.
+            "all"``, an unknown review type, a window that ends before it
+            starts, or an ``[aspect_labels]`` entry that is not a list of
+            aspect names or names an aspect under two versions.
     """
     with open(path, "rb") as f:
         raw = tomllib.load(f)
@@ -293,9 +351,13 @@ def load_study(path: Path = DEFAULT_STUDY_PATH) -> Study:
             cohort=a.get("cohort", ""),
             subgroup=a.get("subgroup", ""),
             tags=tuple(a.get("tags", [])),
+            raw_cap=int(a["raw_cap"]) if "raw_cap" in a else None,
         )
         for a in raw.get("apps", [])
     )
+    bad_caps = [a.app_id for a in apps if a.raw_cap is not None and a.raw_cap < 1]
+    if bad_caps:
+        raise ValueError(f"Study {path}: apps {bad_caps} have a raw_cap below 1.")
     if not apps:
         raise ValueError(f"Study {path} lists no apps.")
     missing = [a.app_id for a in apps if not a.cohort.strip()]
@@ -307,6 +369,23 @@ def load_study(path: Path = DEFAULT_STUDY_PATH) -> Study:
 
     lexicon = meta.get("aspect_lexicon")
     topics = raw.get("topics", {})
+    stats_split = meta.get("stats_split")
+    if stats_split is not None and stats_split not in STATS_SPLITS:
+        raise ValueError(f"Study {path}: stats_split must be one of {sorted(STATS_SPLITS)}.")
+    stats_source = meta.get("stats_source")
+    if stats_source is not None and stats_source not in STATS_SOURCES:
+        raise ValueError(f"Study {path}: stats_source must be one of {sorted(STATS_SOURCES)}.")
+    if stats_source == "full" and stats_split is None:
+        raise ValueError(f"Study {path}: stats_source = \"full\" needs a stats_split.")
+    aspect_labels: list[tuple[str, str]] = []
+    for version, names in raw.get("aspect_labels", {}).items():
+        if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+            raise ValueError(f"Study {path}: aspect_labels.{version} must list aspect names.")
+        aspect_labels.extend((n, version) for n in names)
+    seen = [a for a, _ in aspect_labels]
+    twice = sorted({a for a in seen if seen.count(a) > 1})
+    if twice:
+        raise ValueError(f"Study {path}: aspect_labels names {twice} under more than one version.")
     return Study(
         name=meta["name"],
         title=meta["title"],
@@ -323,6 +402,9 @@ def load_study(path: Path = DEFAULT_STUDY_PATH) -> Study:
         topic_umap_preset=topics.get("umap_preset", "legacy"),
         scores_db=_resolve(meta["scores_db"]) if "scores_db" in meta else None,
         frozen=bool(meta.get("frozen", False)),
+        stats_split=stats_split,
+        stats_source=stats_source,
+        aspect_labels=tuple(aspect_labels),
     )
 
 
@@ -346,9 +428,10 @@ def study_files(study: Study) -> set[Path]:
         study: The study.
 
     Returns:
-        Resolved seed, full, scores and raw paths.
+        Resolved seed, full, scores, analysis and raw paths.
     """
-    return {p.resolve() for p in (study.seed_db, study.full_db, study.scores_path, study.raw_dir)}
+    return {p.resolve() for p in (study.seed_db, study.full_db, study.scores_path,
+                                   study.analysis_db, study.raw_dir)}
 
 
 def all_studies(studies_dir: Path | None = None) -> list[tuple[Path, Study]]:
