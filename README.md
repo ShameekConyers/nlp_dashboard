@@ -2,7 +2,7 @@
 
 An NLP pipeline that turns Steam reviews into structured evidence: BERTopic topics crossed with sentiment, an audited phrase lexicon for named design questions, a transformer sentiment model adopted only after it beat VADER on held-out reviews, and every rate checked against Steam's own recommend flag. It ships two studies, each with a committed SQLite seed and a Streamlit dashboard:
 
-- **Market analysis of historical and tactical strategy games** (September 2026, default): 29 games, 12,315 sampled reviews, 9,622 kept for analysis.
+- **Market analysis of historical and tactical strategy games** (September 2026, default): 29 games, 12,315 sampled reviews, 9,622 kept for analysis. 21 of its 24 findings replicated on 28,200 fresh reviews under a pre-registered protocol.
 - **April 2026 cross-genre baseline**: 12 games across four genres, 2,382 reviews, kept reproducible.
 
 ---
@@ -49,14 +49,14 @@ All numbers come from `data/market_seed.db` (`analysis_runs`, `game_stats`, `coh
 
 The recommend-share and sentiment macros use every game with at least 100 kept reviews, with two-stage cluster-bootstrap intervals; medians pool kept reviews in the scope. RoBERTa scores fewer reviews positive than recommend the game in every scope, by 4.8 to 9.9 points in the rows above and 3.0 to 6.6 in the matched baskets. Per-game RoBERTa and VADER sentiment is in the dashboard's Market Overview.
 
-**Topics crossed with sentiment.** 378 topic lift comparisons were evaluated (42 topics across 9 cohort, subgroup and matched-basket scopes). Four are findings:
+**Topics crossed with sentiment.** 378 topic lift comparisons were evaluated (42 topics across 9 cohort, subgroup and matched-basket scopes). Four are findings. The replication columns come from the confirmatory read described under Confirmatory replication below.
 
-| Topic | Scope (eligible games) | Complaint share | Praise share | Lift (95% CI) | Recommended within topic | RoBERTa positive | Mean VADER |
-|---|---|---|---|---|---|---|---|
-| Crashes / Crash / Crashing / Screen | Turn-structure cohort (18) | 6.3% | 0.5% | 12.8 (7.2 to 29.3) | 21.7% | 9.7% | 0.048 |
-| Crashes / Crash / Crashing / Screen | IGO-UGO (5) | 5.4% | 0.4% | 12.1 (4.9 to 52.1) | 25.5% | 18.5% | 0.206 |
-| Crashes / Crash / Crashing / Screen | WEGO (7) | 7.7% | 0.7% | 11.1 (4.9 to 41.7) | 21.8% | 6.4% | -0.018 |
-| Final / Fantasy / Tactics / Fft (praise) | Alternating, matched basket (3) | 16.5% | 35.1% | 0.47 (0.24 to 0.74) | 94.6% | 90.5% | 0.724 |
+| Topic | Scope (eligible games) | Complaint share | Praise share | Lift (95% CI) | Recommended within topic | RoBERTa positive | Mean VADER | Replication lift (95% CI) | Replication games | Replicated |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Crashes / Crash / Crashing / Screen | Turn-structure cohort (18) | 6.3% | 0.5% | 12.8 (7.2 to 29.3) | 21.7% | 9.7% | 0.048 | 15.9 (9.2 to 29.8) | 15 | yes |
+| Crashes / Crash / Crashing / Screen | IGO-UGO (5) | 5.4% | 0.4% | 12.1 (4.9 to 52.1) | 25.5% | 18.5% | 0.206 | 15.0 (4.2 to 88.0) | 5 | yes |
+| Crashes / Crash / Crashing / Screen | WEGO (7) | 7.7% | 0.7% | 11.1 (4.9 to 41.7) | 21.8% | 6.4% | -0.018 | 15.8 (8.9 to 35.0) | 4 | yes |
+| Final / Fantasy / Tactics / Fft (praise) | Alternating, matched basket (3) | 16.5% | 35.1% | 0.47 (0.24 to 0.74) | 94.6% | 90.5% | 0.724 | 0.51 (0.33 to 3.26) | 3 | did not replicate |
 
 The crash topic also has lifts above 1 in the anchor cohort (18.2, 4.3 to 57.7), which fails the 5-mention floor on the praise side, and in historical peers (3.0) and alternating (18.6), which fail the stability check or have fewer than 3 eligible games. The praise row is a franchise-identity topic covering two of the three matched alternating games (Final Fantasy Tactics and Fell Seal, about 210 reviews each): reviews in that style lean positive, which says more about those games than about a theme.
 
@@ -120,30 +120,30 @@ What the view shows: across all 6,452 aspect-tagged sentences the selected rule 
 
 The first-strike result is a lexicon weakness. Most of its hits are "alpha strike" in the mech-combat sense (firing every weapon at once), not acting first. The lexicon stays frozen as `strategy_v1`, because changing it after the audit would tune on the reported numbers; failing aspects stay in the database, hidden in the dashboard by default. Four of the seven passing aspects are controls, and the passing design aspects are AI quality, initiative and turn order, combat previews, and pacing.
 
-**Design themes: findings.** The seven passing aspects add 63 lift comparisons and 20 findings, all on the complaint side:
+**Design themes: findings.** The seven passing aspects add 63 lift comparisons and 20 findings, all on the complaint side. Replication columns as above:
 
-| Aspect | Scope (eligible games) | Complaint share | Praise share | Lift (95% CI) |
-|---|---|---|---|---|
-| Bugs and performance | Turn-structure cohort (18) | 16.1% | 6.4% | 2.53 (1.94 to 3.51) |
-| Bugs and performance | IGO-UGO (5) | 11.4% | 4.3% | 2.66 (1.12 to 5.70) |
-| Bugs and performance | Alternating (6) | 12.0% | 3.9% | 3.11 (1.90 to 4.66) |
-| Bugs and performance | Alternating, matched basket (3) | 9.0% | 3.5% | 2.59 (1.18 to 4.64) |
-| Bugs and performance | Anchors (3) | 23.7% | 4.9% | 4.86 (3.32 to 8.43) |
-| Pacing | Turn-structure cohort (18) | 12.2% | 4.3% | 2.82 (1.90 to 3.96) |
-| Pacing | IGO-UGO (5) | 7.9% | 3.0% | 2.61 (1.45 to 4.62) |
-| Pacing | Alternating (6) | 17.7% | 5.4% | 3.27 (1.66 to 6.20) |
-| Pacing | WEGO (7) | 10.5% | 4.3% | 2.44 (1.16 to 4.27) |
-| UI and interface | Turn-structure cohort (18) | 12.4% | 5.4% | 2.29 (1.63 to 3.15) |
-| UI and interface | IGO-UGO (5) | 7.3% | 3.8% | 1.91 (1.06 to 2.96) |
-| UI and interface | IGO-UGO, matched basket (4) | 8.7% | 4.4% | 1.97 (1.14 to 3.16) |
-| UI and interface | Alternating (6) | 8.6% | 4.3% | 2.01 (1.02 to 4.29) |
-| UI and interface | WEGO (7) | 19.4% | 7.5% | 2.57 (1.51 to 4.13) |
-| Price and DLC | Turn-structure cohort (18) | 17.5% | 12.3% | 1.42 (1.09 to 1.77) |
-| Price and DLC | WEGO (7) | 20.1% | 11.8% | 1.71 (1.25 to 2.43) |
-| Price and DLC | Anchors (3) | 33.1% | 17.6% | 1.88 (1.43 to 2.43) |
-| Enemy AI quality | Turn-structure cohort (18) | 4.3% | 2.3% | 1.91 (1.05 to 3.37) |
-| Enemy AI quality | Alternating (6) | 4.6% | 0.9% | 4.94 (1.79 to 19.30) |
-| Combat preview and hit chance | Alternating (6) | 5.4% | 0.9% | 5.77 (1.16 to 13.24) |
+| Aspect | Scope (eligible games) | Complaint share | Praise share | Lift (95% CI) | Replication lift (95% CI) | Replication games | Replicated |
+|---|---|---|---|---|---|---|---|
+| Bugs and performance | Turn-structure cohort (18) | 16.1% | 6.4% | 2.53 (1.94 to 3.51) | 3.11 (2.35 to 3.98) | 15 | yes |
+| Bugs and performance | IGO-UGO (5) | 11.4% | 4.3% | 2.66 (1.12 to 5.70) | 3.00 (1.71 to 4.29) | 5 | yes |
+| Bugs and performance | Alternating (6) | 12.0% | 3.9% | 3.11 (1.90 to 4.66) | 3.34 (1.83 to 4.75) | 6 | yes |
+| Bugs and performance | Alternating, matched basket (3) | 9.0% | 3.5% | 2.59 (1.18 to 4.64) | 1.92 (1.26 to 2.65) | 3 | yes |
+| Bugs and performance | Anchors (3) | 23.7% | 4.9% | 4.86 (3.32 to 8.43) | 3.66 (2.79 to 6.47) | 3 | yes |
+| Pacing | Turn-structure cohort (18) | 12.2% | 4.3% | 2.82 (1.90 to 3.96) | 2.53 (2.04 to 3.15) | 15 | yes |
+| Pacing | IGO-UGO (5) | 7.9% | 3.0% | 2.61 (1.45 to 4.62) | 1.94 (0.96 to 3.18) | 5 | did not replicate |
+| Pacing | Alternating (6) | 17.7% | 5.4% | 3.27 (1.66 to 6.20) | 2.87 (2.24 to 4.02) | 6 | yes |
+| Pacing | WEGO (7) | 10.5% | 4.3% | 2.44 (1.16 to 4.27) | 2.45 (1.86 to 3.63) | 4 | yes |
+| UI and interface | Turn-structure cohort (18) | 12.4% | 5.4% | 2.29 (1.63 to 3.15) | 2.22 (1.73 to 2.92) | 15 | yes |
+| UI and interface | IGO-UGO (5) | 7.3% | 3.8% | 1.91 (1.06 to 2.96) | 1.62 (1.09 to 2.75) | 5 | yes |
+| UI and interface | IGO-UGO, matched basket (4) | 8.7% | 4.4% | 1.97 (1.14 to 3.16) | 1.47 (1.005 to 2.28) | 4 | yes |
+| UI and interface | Alternating (6) | 8.6% | 4.3% | 2.01 (1.02 to 4.29) | 2.88 (2.04 to 4.66) | 6 | yes |
+| UI and interface | WEGO (7) | 19.4% | 7.5% | 2.57 (1.51 to 4.13) | 2.23 (1.44 to 3.17) | 4 | yes |
+| Price and DLC | Turn-structure cohort (18) | 17.5% | 12.3% | 1.42 (1.09 to 1.77) | 1.31 (1.04 to 1.66) | 15 | yes |
+| Price and DLC | WEGO (7) | 20.1% | 11.8% | 1.71 (1.25 to 2.43) | 1.51 (0.84 to 2.65) | 4 | did not replicate |
+| Price and DLC | Anchors (3) | 33.1% | 17.6% | 1.88 (1.43 to 2.43) | 1.79 (1.12 to 2.06) | 3 | yes |
+| Enemy AI quality | Turn-structure cohort (18) | 4.3% | 2.3% | 1.91 (1.05 to 3.37) | 2.10 (1.44 to 3.08) | 15 | yes |
+| Enemy AI quality | Alternating (6) | 4.6% | 0.9% | 4.94 (1.79 to 19.30) | 3.15 (2.17 to 5.02) | 6 | yes |
+| Combat preview and hit chance | Alternating (6) | 5.4% | 0.9% | 5.77 (1.16 to 13.24) | 5.93 (3.68 to 12.09) | 6 | yes |
 
 No passing aspect is a praise finding. No subgroup finding, topic or aspect, reverses direction in the matched-basket rows, although many matched rows have intervals that include 1. The lexicon fires rarely on turn-structure aspects: across all 29 games, 14 reviews mention waiting through enemy turns, 8 first-strike advantage, 37 initiative and turn order and 65 combat previews or hit chance, against 1,316 for price and DLC.
 
@@ -152,15 +152,29 @@ No passing aspect is a praise finding. No subgroup finding, topic or aspect, rev
 - Share of kept reviews mentioning any turn-structure aspect: alternating 2.7%, IGO-UGO 1.6%, WEGO 0.7%. Complaint lift: alternating 3.76 (1.41 to 7.06), IGO-UGO 2.18 (0.76 to 18.55), WEGO 2.23 (0.12 to 14.72). The earlier study's hand-coded comments leaned to complaint for IGO-UGO and alternating and to praise for WEGO; the measured direction agrees for the first two and not for WEGO, where the interval spans 1. These combined rows stay descriptive: the combined theme needs all four turn-structure aspects to pass the audit, and two failed. Of the two that passed, one subgroup lift is a finding: combat preview and hit chance in the alternating subgroup (5.77, 1.16 to 13.24).
 - The frozen lexicon tags 27 of the 131 hand-coded turn-system comments (20.6%) with a turn-structure aspect or pacing, a rough recall floor for the lexicon. This number was seen once during a function check before the lexicon was frozen; no lexicon change was made in response. The check is not fully independent of the lexicon's development: 28 of the desk study's 185 quotes are public Steam reviews that also appear in the seed, 14 of them in the development split. The sentence-sentiment check on these comments below involved no tuning.
 
-**Comparisons made:** 459: 441 lift comparisons (378 topic, 63 aspect) and 18 ranking tests. They produced 24 lift findings (4 topic, 20 aspect) and no ranking findings. Intervals are per-comparison 95% and uncorrected, so every finding is exploratory.
+**Comparisons made:** 459: 441 lift comparisons (378 topic, 63 aspect) and 18 ranking tests. They produced 24 lift findings (4 topic, 20 aspect) and no ranking findings. Intervals are per-comparison 95% and uncorrected, so the 24 findings were exploratory when found. The replication below then tested each of them once on fresh reviews.
+
+### Confirmatory replication
+
+The 24 findings were tested once on reviews the study had never used, under a protocol committed and tagged before the read (`docs/replication_protocol.md`, tag `replication-protocol-v1`, commit `a89b4af`). The protocol, the code and the pinned sample hash were public before any replication result existed. 21 of 24 findings replicated, and 7 of 8 theme families.
+
+- **Sample:** 36,774 reviews from the full local database that are in neither the seed nor any audit file, up to 2,000 per game (seed 20261015), from the same windows as the seed. 28,200 passed the text filters. Eight games have no reviews left outside the seed and could not be resampled, four of them eligible in the original study (Frozen Synapse 2, Combat Mission: Battle for Normandy, Three Kingdoms: The Last Warlord, Romance of the Three Kingdoms 8 Remake). Combat Mission: Shock Force 2 fell below the 30 not-recommended floor, as the protocol predicted, so WEGO kept 4 eligible games and the turn-structure cohort 15.
+- **Frozen instruments:** the same cleaning and language rules, the frozen `strategy_v1` lexicon, the saved BERTopic model applied with `transform` (never refit), and the unchanged `src/stats.py` bootstrap (2,000 resamples, games then reviews). The sample, lexicon and model are pinned by SHA-256 and were checked at read time.
+- **Criterion:** a finding replicates when its replication lift lies on the original side of 1 and its 95% interval excludes 1 on that side. Each test is one-sided at 2.5%, so with no true effects about 0.6 of the 24 would pass by chance.
+- **Power, computed before the read:** 21.8 replications expected if the original effects were the truth, 14.8 if every game's log lift were half as large. The study's pass line, 12, is the 5th percentile of the second scenario.
+- **Result:** 21 replicated, 3 did not, none untestable. Study verdict: consistent with power. All 24 kept their direction. The original lift lies inside the replication interval for 23 findings, and every replication lift lies inside its original interval. 19 also meet the full finding rule (stability and support) on the new sample.
+- **Did not replicate:** the Final Fantasy Tactics praise topic in the matched alternating basket (0.51, 0.33 to 3.26), pacing in IGO-UGO (1.94, 0.96 to 3.18), and price and DLC in WEGO (1.51, 0.84 to 2.65). Each kept its direction, but its interval now includes 1. The power analysis had ranked price in WEGO among the weakest findings. These three stay in the tables as exploratory. The other 21 can be called confirmatory. The narrowest pass is UI in the matched IGO-UGO basket, whose lower bound is 1.005.
+- **Deviations from the protocol:** none.
+
+The replication uses the same games and windows, so it shows the findings hold on other reviews of these games, not on other games or later periods. Topic rows use a slightly noisier instrument than the original: forced through the new-data path, `transform` returns the fitted topic for 93.6% of seed reviews.
 
 ### Interpretation
 
-Crash and stability complaints separate negative from positive reviews across the turn-structure titles by the widest, most stable margin: roughly one not-recommended review in sixteen sits in the crash topic, against one recommended review in two hundred. RoBERTa scores under one in ten of those reviews positive, while VADER rates them near neutral, which is the lexicon's known blind spot on critical strategy reviews.
+Crash and stability complaints separate negative from positive reviews across the turn-structure titles by the widest, most stable margin: roughly one not-recommended review in sixteen sits in the crash topic, against one recommended review in two hundred. RoBERTa scores under one in ten of those reviews positive, while VADER rates them near neutral, which is the lexicon's known blind spot on critical strategy reviews. The crash lift replicated in all three scopes on fresh reviews (15.9, 9.2 to 29.8, in the cohort).
 
 Players write more critically than they vote. In every cohort a few points fewer reviews read as positive to RoBERTa than recommend the game, and the gap is widest for the anchors, whose recent windows are also the most critical.
 
-Among design themes, pacing (grind, tedium, late-game drag, micromanagement) and the interface are mentioned roughly two to three times as often in negative reviews as in positive ones across the turn-structure titles, and the pattern holds in all three subgroups. Bugs and performance follow the same pattern in the cohort and in two of the three subgroups. The turn-system questions themselves (waiting, initiative, previews) come up in under 3% of kept reviews in each subgroup, too rarely in this sample to separate the subgroups.
+Among design themes, pacing (grind, tedium, late-game drag, micromanagement) and the interface are mentioned roughly two to three times as often in negative reviews as in positive ones across the turn-structure titles, and the pattern holds in all three subgroups. On fresh reviews the interface replicated in the cohort and all three subgroups, and pacing in the cohort, alternating and WEGO but not IGO-UGO. Bugs and performance follow the same pattern in the cohort and in two of the three subgroups, and all five bugs findings replicated. The turn-system questions themselves (waiting, initiative, previews) come up in under 3% of kept reviews in each subgroup, too rarely in this sample to separate the subgroups.
 
 The subgroup numbers describe these particular games. Genre, franchise and price travel with turn structure, and each subgroup holds 5 to 7 eligible titles, so no difference here is evidence about the turn rule itself.
 
@@ -323,6 +337,8 @@ U=--unfreeze-i-know
 
 These flags reproduce the committed state, with one exception: after the v3 selection, the unselected `j-hartmann` sentence rows were deleted from the seed to keep it under its 20 MiB cap, so a full rerun ends about 0.25 MiB over the cap until the same rows are removed. Document scores come from both review-level candidates, sentence scores from the adopted RoBERTa-large and the selected three-class model. Scoring DistilBERT sentences as well would also push the seed past the cap. To draw a new audit set or import labels, use `export-audit --version <v>` and `import-labels <csv> --version <v>`. The commands above read the committed label files and never regenerate them.
 
+The replication sample and its results stay out of Git because they hold review text. With the full local database, `src/replication.py draw`, `calibrate` and `dry-run` rebuild the sample, the power simulation and a development-only rehearsal. `read` refuses to run unless the working tree is a clean checkout of the `replication-protocol-v1` tag, the sample, lexicon and model hashes match, and no earlier result exists. `src/relabel.py export` and `score` produce the blind relabel files and their agreement statistics.
+
 Without `--study`, every command runs the April baseline as before (`data_pull.py`, `db_setup.py --full`, `preprocessing.py`, `sentiment.py`, `topics.py`); commands that write its files need `--unfreeze-i-know`.
 
 ---
@@ -387,7 +403,13 @@ nlp_dashboard/
 │   ├── validation.py           # Balanced accuracy, macro-F1, AUC, paired bootstrap
 │   ├── topics.py               # BERTopic topic modeling
 │   ├── aspects.py              # Phrase-lexicon aspect tagging and audit export
-│   └── stats.py                # Intervals, cohort statistics, finding rule, coverage check
+│   ├── stats.py                # Intervals, cohort statistics, finding rule, coverage check
+│   ├── replication.py          # Pre-registered replication: draw, power, gated one-time read
+│   ├── relabel.py              # Blind relabel export and scoring
+│   └── agreement.py            # Cohen's kappa, Gwet's AC1, bootstrap intervals
+├── docs/
+│   ├── replication_protocol.md # Replication protocol v1, committed before the read
+│   └── relabel_instructions.md # Guide for the blind relabel
 ├── studies/
 │   ├── april_2026_baseline.toml
 │   ├── strategy_market_2026.toml
@@ -401,7 +423,7 @@ nlp_dashboard/
 │   ├── seed_transformer_scores.db # April transformer scores (0.1 MiB)
 │   ├── market_seed.db          # Market study seed with transformer scores (19.9 MiB)
 │   └── labels/                 # Audit labeling guides and labels
-├── tests/                      # 195 tests covering pull, schema, study CLI, pipeline, frozen studies, NLP, statistics, sentiment validation, dashboard
+├── tests/                      # 225 tests covering pull, schema, study CLI, pipeline, frozen studies, NLP, statistics, sentiment validation, replication, agreement, dashboard
 └── requirements.txt
 ```
 
@@ -413,4 +435,5 @@ The committed databases stay under 25 MB together: 23,330,816 bytes (22.2 MiB, 2
 
 - **Lexicon v2.** Rewrite the four failing aspects and audit them on fresh test-split sentences; `strategy_v1` stays the cited version.
 - **Sentence sentiment, tighter labels.** The neither class holds the sentence gate back (F1 0.51 on v3), and it is also the softest label: the guide sends every tie to neither, so the class mixes neutral, balanced-mixed and undecidable sentences. A future version would split that class in the guide (neutral against mixed) and relabel, which changes the target and so counts as a new study design, not a fourth attempt at this gate.
+- **Human relabel.** Blind files for the four aspects nearest the precision floor (pacing, bugs and performance, UI, price and DLC, 160 sentences) and the v3 sentence set (200 sentences) are ready, with scoring by Cohen's kappa and Gwet's AC1 committed under the protocol tag. The results will be reported against the 0.80 and 0.70 gates whatever they show.
 - **Transformer validation per study.** A dev and test comparison inside any study, so a new study can adopt a transformer scorer on its own evidence.
