@@ -1,9 +1,10 @@
 # What Are Customers Actually Saying? NLP-Powered Review Analysis
 
-An NLP pipeline that turns Steam reviews into structured evidence: BERTopic topics crossed with sentiment, an audited phrase lexicon for named design questions, a transformer sentiment model adopted only after it beat VADER on held-out reviews, and every rate checked against Steam's own recommend flag. It ships two studies, each with a committed SQLite seed and a Streamlit dashboard:
+An NLP pipeline that turns Steam reviews into structured evidence: BERTopic topics crossed with sentiment, an audited phrase lexicon for named design questions, a transformer sentiment model adopted only after it beat VADER on held-out reviews, and every rate checked against Steam's own recommend flag. It ships two studies, each with a committed SQLite seed and a Streamlit dashboard, and a third, pre-registered study read on the local full database:
 
 - **Market analysis of historical and tactical strategy games** (September 2026, default): 29 games, 12,315 sampled reviews, 9,622 kept for analysis. 21 of its 24 findings replicated on 28,200 fresh reviews under a pre-registered protocol.
 - **April 2026 cross-genre baseline**: 12 games across four genres, 2,382 reviews, kept reproducible.
+- **Real-time-with-pause versus turn-based combat** (October 2026): 26 CRPGs and strategy games, 239,850 reviews split by review ID into a development half and a test half. 59 of its 66 development-half candidates replicated on 119,485 test-half reviews under a pre-registered protocol.
 
 ---
 
@@ -190,6 +191,173 @@ The subgroup numbers describe these particular games. Genre, franchise and price
 - **Audit labels are model-made.** Independent model labelers that saw only a guide and the sentences labelled the aspect audit (ties resolved as not relevant) and the sentence sentiment audit (ties resolved as neither). The labels live in `data/labels/` so they can be relabeled and rescored.
 - **Four aspects failed the audit.** First-strike advantage (27.5%) mostly catches the mech-combat sense of "alpha strike", and maps (52.5%), waiting through enemy turns (62.5%) and translation (67.5%) also fall short. They make no claims in this version.
 - **Infinite lifts in sparse rows.** When a theme has no recommended-review mentions in a bootstrap resample, its lift (complaint share over praise share) is infinite there. The percentile interval ignores those resamples, so some upper bounds sit lower than they would otherwise. The database stores an infinite point lift or bound as empty. None of the 958 affected rows is a finding.
+
+---
+
+## Real-time-with-pause versus turn-based combat
+
+A pre-registered study run on the local full database (October 2026). It has no committed seed or dashboard view. Its design is in `docs/rtwp_turn_study_design.md`, its protocol in `docs/rtwp_turn_protocol.md` (tag `rtwp-turn-protocol-v1`, commit `69f051d`), and its numbers below come from the one confirmatory read.
+
+### Business question
+
+A team choosing between real-time-with-pause (RTwP) combat and turn-based combat for a party RPG or a strategy game wants to know what players of comparable games complain about under each model, and what players of games that offer both modes say about the choice. The question is which complaint drivers hold up on reviews the analysis never saw.
+
+### Games and sampling
+
+- **Games:** 26 titles in `studies/rtwp_turn_2026.toml`. CRPGs with RTwP combat: Baldur's Gate, Baldur's Gate II and Icewind Dale (Enhanced Editions), Tyranny, Black Geyser. Turn-based CRPGs: Divinity: Original Sin 2, Baldur's Gate 3, Solasta, Warhammer 40,000: Rogue Trader, Wasteland 3. Pausable real-time grand strategy: Europa Universalis IV, Crusader Kings III, Hearts of Iron IV, Victoria 3, Stellaris. Turn-based strategy: Civilization VI, Old World, Humankind, Age of Wonders 4, Endless Legend. Dual-mode games, analysed on their own: Pillars of Eternity (turn-based mode live April 6, 2026), Pathfinder: Kingmaker (turn-based mode added August 18, 2020), Pillars of Eternity II: Deadfire (January 24, 2019), Pathfinder: Wrath of the Righteous and the two Combat Mission games (both modes at launch). Each classification cites the store page or a developer post in the design doc.
+- **Pull (15 October 2026):** the market study's settings (`filter=recent`, English, all review and purchase types, newest first), capped at 10,000 reviews per game and 20,000 for the dual-mode games. 240,711 reviews were pulled and 239,850 loaded. Humankind's cursor stopped at 9,800, so its oldest 5,516 reviews are missing. The cap cut the oldest 2,341 reviews of Kingmaker and 4,279 of Wrath of the Righteous.
+- **Two halves:** a hash of each review ID puts it in a development half (119,766 reviews, 89,953 kept) or a test half. Everything exploratory (phase A) ran on the development half. The test half, minus the 599 reviews that supplied audit sentences, is the confirmatory frame: 119,485 reviews, pinned as a committed list of IDs (`data/frames/`).
+- **Eligibility:** the market study's rule (100 kept and 30 not-recommended reviews). 25 of 26 games qualify in both halves. Combat Mission: Battle for Normandy does not.
+
+### Method
+
+1. **Same instruments as the market study:** the cleaning, language and token rules, VADER (development balanced accuracy 0.699, used in no criterion), the lift, the two-stage cluster bootstrap and the finding rule of `src/stats.py`. Scopes are the CRPG, strategy and dual-mode cohorts, each combat model pooled across CRPG and strategy, and the four cohort and combat-model pairs.
+2. **Topics:** BERTopic fit on the 89,953 kept development-half reviews only, 196 topics. Test-half reviews get topics from `transform`, which keeps 88.4% of fitted assignments on the new-data path (70.3% for topic 3).
+3. **Lexicon:** nine aspects. Six describe combat models: the turn-based mode, the RTwP mode, pausing and micromanagement, chaotic real-time combat, waiting through turns, and slow or too many fights. Three are controls: bugs and performance, UI clarity, and price and DLC.
+4. **Precision audit, two attempts, then frozen.** A fresh model labeler (Claude Opus) that saw only the labeling guide and the sentences labelled 40 test-half sentences per aspect, ties resolved as not relevant. Lexicon v2 passed 3 of 9 aspects. Lexicon v3 revised the six that failed, using development-half sentences only and without seeing the v2 labels, and a second fresh labeler audited 240 new sentences from reviews outside the first set. All six passed. Each aspect's precision comes from its governing label file:
+
+| Aspect | v2 audit, relevant of 40 | v3 audit, relevant of 40 | Governing precision (Wilson 95% CI) |
+|---|---|---|---|
+| Turn-based mode | 26 | 40 | 100.0% (91.2% to 100.0%), v3 |
+| RTwP mode | 36 | | 90.0% (76.9% to 96.0%), v2 |
+| Pausing and micromanagement | 27 | 38 | 95.0% (83.5% to 98.6%), v3 |
+| Chaotic real-time combat | 33 | | 82.5% (68.1% to 91.3%), v2 |
+| Waiting through turns | 30 | 38 | 95.0% (83.5% to 98.6%), v3 |
+| Slow or too many fights | 26 | 32 | 80.0% (65.2% to 89.5%), v3, at the floor |
+| Bugs and performance | 37 | | 92.5% (80.1% to 97.4%), v2 |
+| UI clarity | 31 | 34 | 85.0% (70.9% to 92.9%), v3 |
+| Price and DLC | 28 | 33 | 82.5% (68.1% to 91.3%), v3 |
+
+5. **Candidates:** on the development half, with every aspect assumed to pass, the finding rule produced 66 candidates from 1,845 lift comparisons: 14 on combat-model aspects, 25 on control aspects and 27 on six topics. 64 are on the complaint side and 2 on the praise side. These are what the confirmatory read tests.
+
+### Confirmatory read
+
+The 66 candidates were tested once (phase B) on the 119,485 frame reviews, under a protocol committed and tagged before the read. The read refuses to run unless the tree is clean, HEAD carries the tag, no results file exists and seven pinned files match their SHA-256. 59 of 66 replicated, and 10 of 14 theme families.
+
+- **Sample:** 119,485 test-half reviews, 89,416 kept, 25 games eligible. No development-half review and no audit review enters it.
+- **Frozen instruments:** lexicon `rtwp_turn_v3`, the development-half topic model applied with `transform`, the two label files and the unchanged statistics, all pinned by SHA-256 and checked at read time.
+- **Criterion:** the market study's. A candidate replicates when its phase B lift lies on its development side of 1 and its 95% interval (2,000 resamples, seed 42, games then reviews) excludes 1 on that side. Each test is one-sided at 2.5%, so with no true effects about 1.65 of the 66 would pass by chance. A family replicates when more than half of its testable candidates do.
+- **Power, computed before the read on the development half:** 60.0 replications expected if the development effects were the truth (5th to 95th percentile 56 to 63), 46.7 if every game's log lift were half as large (43 to 51). The pass line, 43, is the 5th percentile of the second scenario. The 14 combat-model candidates were expected to contribute 9.8 and 2.5, reported with no verdict.
+- **Result:** 59 replicated, 7 did not, none untestable. Study verdict: consistent with power. Combat-model candidates: 9 of 14 replicated, against 9.8 and 2.5 expected. Every candidate kept its direction. The development lift lies inside the phase B interval for 65 candidates, and the phase B lift inside the development interval for 64. 52 also meet the full finding rule on the new sample. The narrowest pass is price and DLC in the pooled turn-based scope, lower bound 1.12.
+- **Did not replicate:** both turn-based-mode praise candidates (pooled turn-based 0.60, 0.36 to 1.02, and turn-based strategy 0.52, 0.25 to 1.05), pausing and micromanagement in turn-based CRPGs (1.66, 0.00 to 3.84), chaotic real-time combat in turn-based CRPGs (4.02, 0.00 to 23.3), waiting through turns in the pooled turn-based scope (1.56, 0.00 to 9.70), price and DLC in turn-based strategy (1.25, 0.92 to 1.52) and the DLC topic in the pooled turn-based scope (1.86, 0.89 to 3.09). Each kept its direction, but its interval now includes 1. Five of the seven are combat-model candidates. The power analysis had ranked chaotic combat in turn-based CRPGs (power 0.01 under halved effects) and waiting through turns (0.03) as the weakest, and both failed. Four others on that list replicated: chaotic combat in the pooled turn-based scope, and pausing and micromanagement in the pooled RTwP, strategy RTwP and dual-mode scopes. A lower bound of 0.00 means at least one resample in forty held no complaint mention.
+- **Deviations from the protocol:** none.
+
+Families: bugs and performance 9 of 9, slow or too many fights 3 of 3, UI clarity 9 of 9, pausing and micromanagement 5 of 6, price and DLC 6 of 7, and five topics (party and enemies 4 of 4, crashes 8 of 8, AI and armies 4 of 4, multiplayer and desync 6 of 6, Paradox DLC 3 of 3) replicated. Turn-based mode 0 of 2, waiting through turns 0 of 1, chaotic real-time combat 1 of 2 and the DLC topic 1 of 2 did not.
+
+**Combat-model candidates.** Complaint and praise shares are phase B macro shares. Scope game counts are phase B eligible games.
+
+| Theme | Scope (phase B games) | Development lift (95% CI) | Complaint share | Praise share | Phase B lift (95% CI) | Replicated | Full rule |
+|---|---|---|---|---|---|---|---|
+| Slow or too many fights | CRPG cohort (10) | 4.61 (2.00 to 9.71) | 1.2% | 0.2% | 6.35 (3.09 to 14.0) | yes | yes |
+| Slow or too many fights | Turn-based, pooled (10) | 4.43 (2.07 to 10.1) | 1.2% | 0.2% | 6.74 (3.64 to 14.2) | yes | yes |
+| Slow or too many fights | CRPG turn-based (5) | 5.89 (2.79 to 14.7) | 1.7% | 0.3% | 6.43 (2.87 to 17.2) | yes | yes |
+| Turn-based mode (praise) | Turn-based, pooled (10) | 0.63 (0.39 to 0.99) | 2.0% | 3.3% | 0.60 (0.36 to 1.02) | did not replicate | no |
+| Turn-based mode (praise) | Strategy turn-based (5) | 0.47 (0.25 to 0.74) | 1.0% | 1.8% | 0.52 (0.25 to 1.05) | did not replicate | no |
+| Pausing and micromanagement | Dual-mode cohort (5) | 1.90 (1.23 to 2.63) | 3.8% | 1.7% | 2.22 (1.30 to 3.19) | yes | yes |
+| Pausing and micromanagement | Strategy cohort (10) | 1.90 (1.16 to 2.97) | 1.9% | 1.0% | 2.04 (1.41 to 2.91) | yes | yes |
+| Pausing and micromanagement | RTwP, pooled (10) | 1.60 (1.03 to 2.30) | 2.2% | 1.0% | 2.15 (1.45 to 3.24) | yes | yes |
+| Pausing and micromanagement | Turn-based, pooled (10) | 2.33 (1.21 to 4.18) | 1.2% | 0.6% | 1.91 (1.14 to 3.01) | yes | yes |
+| Pausing and micromanagement | CRPG turn-based (5) | 5.21 (2.08 to 15.9) | 0.3% | 0.2% | 1.66 (0.00 to 3.84) | did not replicate | no |
+| Pausing and micromanagement | Strategy RTwP (5) | 1.78 (1.29 to 2.81) | 1.7% | 0.8% | 2.17 (1.37 to 3.69) | yes | yes |
+| Chaotic real-time combat | Turn-based, pooled (10) | 4.76 (1.78 to 13.7) | 0.2% | 0.0% | 4.39 (1.18 to 17.3) | yes | yes |
+| Chaotic real-time combat | CRPG turn-based (5) | 4.69 (1.23 to 17.9) | 0.2% | 0.0% | 4.02 (0.00 to 23.3) | did not replicate | no |
+| Waiting through turns | Turn-based, pooled (10) | 2.96 (1.26 to 6.42) | 0.1% | 0.0% | 1.56 (0.00 to 9.70) | did not replicate | no |
+
+<details>
+<summary>The other 52 candidates (controls and topics)</summary>
+
+| Theme | Scope (phase B games) | Development lift (95% CI) | Complaint share | Praise share | Phase B lift (95% CI) | Replicated | Full rule |
+|---|---|---|---|---|---|---|---|
+| Bugs and performance | CRPG cohort (10) | 2.87 (2.36 to 3.59) | 24.6% | 8.2% | 3.00 (2.34 to 3.97) | yes | yes |
+| Bugs and performance | Dual-mode cohort (5) | 2.21 (1.68 to 3.14) | 29.1% | 12.8% | 2.27 (1.61 to 3.31) | yes | yes |
+| Bugs and performance | Strategy cohort (10) | 3.89 (3.13 to 4.91) | 21.3% | 5.3% | 4.00 (3.25 to 4.94) | yes | yes |
+| Bugs and performance | RTwP, pooled (10) | 3.37 (2.56 to 4.56) | 22.0% | 6.5% | 3.39 (2.38 to 4.79) | yes | yes |
+| Bugs and performance | Turn-based, pooled (10) | 3.17 (2.71 to 3.86) | 24.0% | 7.0% | 3.40 (2.90 to 4.29) | yes | yes |
+| Bugs and performance | CRPG RTwP (5) | 2.90 (2.10 to 4.24) | 23.3% | 8.3% | 2.82 (1.94 to 4.47) | yes | yes |
+| Bugs and performance | CRPG turn-based (5) | 2.84 (2.47 to 3.37) | 25.9% | 8.1% | 3.18 (2.68 to 4.40) | yes | yes |
+| Bugs and performance | Strategy RTwP (5) | 4.24 (3.40 to 5.90) | 20.6% | 4.7% | 4.38 (3.42 to 6.06) | yes | yes |
+| Bugs and performance | Strategy turn-based (5) | 3.62 (2.69 to 5.05) | 22.1% | 6.0% | 3.71 (2.81 to 5.00) | yes | yes |
+| Price and DLC | Dual-mode cohort (5) | 1.64 (1.23 to 2.11) | 17.1% | 9.5% | 1.79 (1.24 to 2.29) | yes | yes |
+| Price and DLC | Strategy cohort (10) | 1.90 (1.52 to 2.28) | 20.0% | 11.2% | 1.78 (1.41 to 2.15) | yes | yes |
+| Price and DLC | RTwP, pooled (10) | 1.94 (1.33 to 2.47) | 17.9% | 9.6% | 1.87 (1.37 to 2.33) | yes | yes |
+| Price and DLC | Turn-based, pooled (10) | 1.41 (1.13 to 1.65) | 11.9% | 8.3% | 1.43 (1.12 to 1.77) | yes | yes |
+| Price and DLC | CRPG turn-based (5) | 1.49 (1.06 to 1.82) | 11.4% | 6.8% | 1.68 (1.17 to 2.15) | yes | yes |
+| Price and DLC | Strategy RTwP (5) | 2.33 (2.00 to 2.72) | 27.7% | 12.6% | 2.20 (1.89 to 2.70) | yes | yes |
+| Price and DLC | Strategy turn-based (5) | 1.35 (1.02 to 1.65) | 12.4% | 9.9% | 1.25 (0.92 to 1.52) | did not replicate | no |
+| UI clarity | CRPG cohort (10) | 2.48 (1.69 to 3.83) | 7.1% | 3.2% | 2.19 (1.58 to 3.11) | yes | yes |
+| UI clarity | Dual-mode cohort (5) | 2.37 (1.72 to 3.28) | 10.1% | 4.2% | 2.44 (1.65 to 3.36) | yes | yes |
+| UI clarity | Strategy cohort (10) | 2.65 (2.02 to 3.67) | 6.5% | 2.7% | 2.42 (1.90 to 3.18) | yes | yes |
+| UI clarity | RTwP, pooled (10) | 2.53 (1.74 to 3.68) | 6.9% | 3.0% | 2.30 (1.61 to 3.30) | yes | yes |
+| UI clarity | Turn-based, pooled (10) | 2.59 (1.93 to 3.83) | 6.7% | 2.9% | 2.28 (1.82 to 3.00) | yes | yes |
+| UI clarity | CRPG RTwP (5) | 2.07 (1.28 to 3.24) | 8.3% | 4.4% | 1.88 (1.24 to 2.88) | yes | yes |
+| UI clarity | CRPG turn-based (5) | 3.45 (2.10 to 7.11) | 5.9% | 2.1% | 2.85 (2.01 to 4.80) | yes | yes |
+| UI clarity | Strategy RTwP (5) | 3.86 (2.88 to 5.40) | 5.5% | 1.6% | 3.49 (2.77 to 4.58) | yes | yes |
+| UI clarity | Strategy turn-based (5) | 2.11 (1.48 to 2.95) | 7.5% | 3.8% | 1.97 (1.50 to 2.60) | yes | yes |
+| Topic 1, DLC | Turn-based, pooled (10) | 2.02 (1.27 to 3.27) | 2.6% | 1.4% | 1.86 (0.89 to 3.09) | did not replicate | no |
+| Topic 1, DLC | Strategy RTwP (5) | 1.54 (1.20 to 1.92) | 11.0% | 6.8% | 1.62 (1.20 to 2.23) | yes | yes |
+| Topic 3, party and enemies | CRPG cohort (10) | 3.05 (1.88 to 4.64) | 5.2% | 1.3% | 4.05 (2.42 to 6.37) | yes | yes |
+| Topic 3, party and enemies | Dual-mode cohort (5) | 3.55 (2.62 to 4.44) | 5.8% | 1.4% | 4.03 (3.08 to 4.83) | yes | yes |
+| Topic 3, party and enemies | CRPG RTwP (5) | 2.25 (1.09 to 4.44) | 4.5% | 1.5% | 2.96 (1.45 to 6.21) | yes | yes |
+| Topic 3, party and enemies | CRPG turn-based (5) | 4.29 (3.24 to 5.55) | 5.8% | 1.0% | 5.71 (3.68 to 7.91) | yes | yes |
+| Topic 11, crashes | CRPG cohort (10) | 24.4 (14.0 to 45.0) | 3.3% | 0.1% | 38.9 (21.0 to 96.3) | yes | yes |
+| Topic 11, crashes | Dual-mode cohort (5) | 17.3 (7.26 to 53.0) | 2.8% | 0.3% | 8.73 (2.97 to 18.8) | yes | no |
+| Topic 11, crashes | Strategy cohort (10) | 10.3 (7.28 to 15.7) | 5.1% | 0.4% | 11.3 (7.48 to 17.7) | yes | yes |
+| Topic 11, crashes | RTwP, pooled (10) | 11.8 (7.28 to 21.1) | 4.5% | 0.3% | 16.2 (8.96 to 38.1) | yes | yes |
+| Topic 11, crashes | Turn-based, pooled (10) | 14.9 (9.56 to 31.0) | 3.8% | 0.3% | 15.1 (9.75 to 31.7) | yes | yes |
+| Topic 11, crashes | CRPG RTwP (5) | 23.5 (9.89 to 66.3) | 4.0% | 0.1% | 46.4 (20.0 to 228.4) | yes | yes |
+| Topic 11, crashes | Strategy RTwP (5) | 9.03 (5.30 to 14.2) | 5.1% | 0.5% | 10.8 (5.71 to 20.2) | yes | yes |
+| Topic 11, crashes | Strategy turn-based (5) | 12.2 (7.94 to 29.1) | 5.0% | 0.4% | 11.8 (7.54 to 25.1) | yes | yes |
+| Topic 15, AI and armies | Strategy cohort (10) | 6.23 (4.63 to 8.99) | 4.6% | 0.8% | 5.39 (3.95 to 7.72) | yes | yes |
+| Topic 15, AI and armies | RTwP, pooled (10) | 8.58 (4.31 to 14.7) | 1.5% | 0.3% | 5.84 (2.41 to 10.5) | yes | no |
+| Topic 15, AI and armies | Strategy RTwP (5) | 9.50 (4.65 to 17.4) | 2.8% | 0.4% | 7.54 (4.36 to 12.6) | yes | no |
+| Topic 15, AI and armies | Strategy turn-based (5) | 5.30 (3.90 to 7.33) | 6.3% | 1.3% | 4.79 (3.26 to 6.96) | yes | yes |
+| Topic 19, multiplayer and desync | CRPG cohort (10) | 11.3 (6.46 to 18.0) | 2.6% | 0.2% | 10.6 (6.17 to 18.3) | yes | yes |
+| Topic 19, multiplayer and desync | Strategy cohort (10) | 9.08 (5.97 to 12.4) | 3.4% | 0.5% | 7.01 (4.20 to 9.80) | yes | yes |
+| Topic 19, multiplayer and desync | RTwP, pooled (10) | 12.1 (7.26 to 18.4) | 2.7% | 0.3% | 8.47 (4.80 to 14.1) | yes | yes |
+| Topic 19, multiplayer and desync | Turn-based, pooled (10) | 8.42 (5.66 to 11.5) | 3.3% | 0.4% | 8.06 (4.86 to 11.5) | yes | no |
+| Topic 19, multiplayer and desync | CRPG RTwP (5) | 15.0 (7.77 to 34.6) | 3.0% | 0.2% | 12.8 (5.40 to 27.7) | yes | no |
+| Topic 19, multiplayer and desync | Strategy turn-based (5) | 9.02 (5.85 to 14.0) | 4.3% | 0.6% | 7.79 (3.40 to 11.5) | yes | no |
+| Topic 38, Paradox DLC | Strategy cohort (10) | 5.22 (3.49 to 7.83) | 3.4% | 0.7% | 4.71 (3.04 to 8.29) | yes | yes |
+| Topic 38, Paradox DLC | RTwP, pooled (10) | 5.15 (3.29 to 8.27) | 3.1% | 0.7% | 4.69 (2.90 to 8.79) | yes | no |
+| Topic 38, Paradox DLC | Strategy RTwP (5) | 5.18 (3.39 to 7.89) | 6.0% | 1.3% | 4.62 (2.98 to 8.46) | yes | yes |
+
+</details>
+
+**Ranking findings, reported without a verdict.** Bugs and performance is still the most-cited complaint aspect, clear of the second, in the three scopes where it was one on the development half: the CRPG cohort (24.6% of not-recommended reviews, 18.8% to 32.1%), the pooled turn-based scope (24.0%, 17.8% to 32.0%) and RTwP CRPGs (23.3%, 18.1% to 29.7%). The ranking rule holds in no other scope.
+
+**Combat-model rows that are not candidates.** The read also reports 40 descriptive rows, one for each combat-model aspect in each scope with at least 3 eligible games. The RTwP mode aspect is a candidate nowhere.
+
+**Dual-mode games, descriptive.** Share of reviews recommending the game, by which modes the review mentions (reviews in brackets for the mode-only groups):
+
+| Game | Kept reviews | Turn-based only | RTwP only | Both | Neither |
+|---|---|---|---|---|---|
+| Pillars of Eternity | 6,639 | 75.9% (174) | 87.6% (153) | 83.7% (49) | 86.2% (6,263) |
+| Pathfinder: Kingmaker | 8,538 | 81.1% (562) | 68.4% (76) | 78.7% (169) | 73.3% (7,731) |
+| Pillars of Eternity II: Deadfire | 4,507 | 92.4% (396) | 91.0% (67) | 91.6% (143) | 85.8% (3,901) |
+| Pathfinder: Wrath of the Righteous | 7,903 | 76.8% (367) | 69.7% (33) | 81.6% (174) | 79.4% (7,329) |
+
+In Kingmaker and Deadfire, reviews that mention only the turn-based mode recommend the game more often than reviews that mention neither mode, and the Wilson intervals do not overlap (Kingmaker 77.7% to 84.2% against 72.3% to 74.3%, Deadfire 89.4% to 94.6% against 84.7% to 86.9%). Pillars of Eternity goes the other way (69.0% to 81.6% against 85.4% to 87.1%), but 130 of its 174 turn-based-only reviews were written before the mode went live, when a mention of turn-based combat was usually a comparison or a request. In Wrath of the Righteous the intervals overlap. The Combat Mission games have 231 and 84 kept reviews. Before and after each mode's arrival, the recommend share went from 77.9% (3,910 reviews) to 70.5% (4,628) for Kingmaker, from 83.1% (1,086) to 87.8% (3,421) for Deadfire and from 86.0% (6,476) to 85.9% (163) for Pillars of Eternity. Time confounds those comparisons with every patch and edition that shipped alongside the mode, so they describe these games and test nothing.
+
+### Interpretation
+
+The complaints that separate negative from positive reviews most reliably are the same under both combat models. Bugs and performance, crashes, multiplayer desync and the interface replicated in every scope where they were candidates, RTwP and turn-based alike, and price and DLC in six of seven. Bugs and performance alone appears in about a quarter of not-recommended CRPG reviews.
+
+Among combat-model themes, slow or too many fights is the strongest replicated complaint: about six times as common in negative reviews as in positive ones in the CRPG cohort, the turn-based CRPGs and the pooled turn-based scope. It was not a candidate in any RTwP-only scope, so the read does not say whether it holds under RTwP. Pausing and micromanagement replicated as a complaint in the pooled RTwP and turn-based scopes, in strategy games and in the dual-mode games, at about twice the rate in negative reviews. In grand strategy it covers babysitting armies and the economy as well as pausing, so it is not a pure combat finding. The turn-based mode as a praise theme did not replicate: both intervals now reach just past 1.
+
+No candidate compares RTwP games with turn-based games directly. Each one compares negative with positive reviews inside one scope, so a difference between two scopes is read off two rows side by side and was not tested.
+
+### Limitations
+
+- **Same games, same windows.** The read shows the findings hold on other reviews of these games, not on other games or later reviews.
+- **Confounding.** Four of the five RTwP CRPGs are 2013 to 2016 releases and three are Beamdog enhanced editions. Every RTwP strategy game is a Paradox title, and the strategy cohort is also grand strategy against 4X. Endless Legend's battles resolve both sides' orders at once, close to WEGO. A combat-model difference here can be an era, studio or genre difference.
+- **Missing launch weeks.** The cap cut Kingmaker's and Wrath of the Righteous' oldest reviews and Humankind's cursor stopped early, so their launch periods are missing. Pillars of Eternity's turn-based beta ran from November 7, 2025, inside its before period, and it has only six months of reviews after the mode.
+- **Two audits, two labelers.** The v3 lexicon and the second labeler changed at once, so the gain from the first audit to the second cannot be credited to the lexicon alone. Slow or too many fights passed exactly at the 80% floor.
+- **Topic noise.** Topic membership in the read comes from `transform`, which keeps 88.4% of fitted assignments and 70.3% for topic 3, so the topic candidates' power was optimistic.
+- **Dual-mode views are descriptive.** Mode mentions are self-selected and the before and after comparisons are confounded by time.
+
+### Reproducing the read
+
+The protocol, the code, the lexicons, both label files and guides, and the frame's review IDs are committed. The full database, the topic model, the candidates file and the power file live under ignored paths. The last three are pinned by SHA-256 in the protocol, so a regenerated copy can be checked, though a refit topic model need not match its hash. A new Steam pull returns a different review set, because new reviews arrive and capped windows move, so the read cannot be repeated byte for byte from the repository. The design doc's section 10 lists the commands that built phase A, and `src/rtwp_read.py gate` and `read` ran the confirmatory read once at the tag.
 
 ---
 
@@ -405,15 +573,22 @@ nlp_dashboard/
 │   ├── aspects.py              # Phrase-lexicon aspect tagging and audit export
 │   ├── stats.py                # Intervals, cohort statistics, finding rule, coverage check
 │   ├── replication.py          # Pre-registered replication: draw, power, gated one-time read
+│   ├── dual_mode.py            # Mode-mention and before-and-after views for dual-mode games
+│   ├── rtwp_power.py           # Power simulation for the RTwP study's candidates
+│   ├── rtwp_read.py            # RTwP frame, topic agreement, gate and one-time read
 │   ├── relabel.py              # Blind relabel export and scoring
 │   └── agreement.py            # Cohen's kappa, Gwet's AC1, bootstrap intervals
 ├── docs/
 │   ├── replication_protocol.md # Replication protocol v1, committed before the read
+│   ├── rtwp_turn_study_design.md # RTwP study design and development-half results
+│   ├── rtwp_turn_protocol.md   # RTwP protocol, committed before the read
 │   └── relabel_instructions.md # Guide for the blind relabel
 ├── studies/
 │   ├── april_2026_baseline.toml
 │   ├── strategy_market_2026.toml
 │   ├── aspects_strategy_v1.toml
+│   ├── rtwp_turn_2026.toml
+│   ├── aspects_rtwp_turn_v{1,2,3}.toml # RTwP lexicons, v3 frozen
 │   └── aspects_generic_v1.toml # Unaudited lexicon for any genre
 ├── dashboard/
 │   ├── app.py                  # Streamlit dashboard
@@ -422,8 +597,9 @@ nlp_dashboard/
 │   ├── seed.db                 # April baseline seed (2.3 MiB, hash fixed)
 │   ├── seed_transformer_scores.db # April transformer scores (0.1 MiB)
 │   ├── market_seed.db          # Market study seed with transformer scores (19.9 MiB)
-│   └── labels/                 # Audit labeling guides and labels
-├── tests/                      # 225 tests covering pull, schema, study CLI, pipeline, frozen studies, NLP, statistics, sentiment validation, replication, agreement, dashboard
+│   ├── labels/                 # Audit labeling guides and labels
+│   └── frames/                 # Pinned review-ID frame of the RTwP read
+├── tests/                      # 332 tests covering pull, schema, study CLI, pipeline, frozen studies, NLP, statistics, sentiment validation, replication, RTwP power and read, dual-mode views, agreement, dashboard
 └── requirements.txt
 ```
 
